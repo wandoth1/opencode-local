@@ -32,12 +32,81 @@ export const execute = (tool: Tool.Info<any, any>, input: unknown, context: Tool
   })
 
 const decodeInput = (schema: Tool.ValueSchema<any>, value: unknown) => {
-  if (Schema.isSchema(schema))
-    return Schema.decodeUnknownEffect(schema)(value).pipe(
-      Effect.mapError((error) => new Tool.Error({ message: `Invalid tool input: ${error.message}` })),
-    )
+  if (Schema.isSchema(schema)) {
+    const decode = Schema.decodeUnknownEffect(schema)(value)
+    // Effect schemas are version-coupled to the effect instance that created them. A config
+    // plugin bundling a different effect version than the server still passes the host
+    // `isSchema` check (the `~effect/Schema/Schema` TypeId string is stable across versions),
+    // but the host decoder cannot interpret the foreign AST and rejects even valid inputs.
+    // The schema's own constructor (`makeEffect`) validates with the schema's own instance,
+    // so fall back to it when the host decode fails. This is only safe when the schema has
+    // no transformations or decoding defaults (make view === decoded view); for transformed
+    // schemas the make view is the type side, so the fallback could silently accept input
+    // that decode would reject.
+    if (!hasTransformations(schema)) {
+      return decode.pipe(
+        Effect.matchEffect({
+          onFailure: (error) =>
+            schema.makeEffect(value).pipe(
+              Effect.matchEffect({
+                onFailure: (makeError) =>
+                  Effect.fail(
+                    new Tool.Error({
+                      message: `Invalid tool input: ${
+                        typeof makeError === "object" && makeError !== null && "message" in makeError
+                          ? String((makeError as { message: unknown }).message)
+                          : error.message
+                      }`,
+                    }),
+                  ),
+                onSuccess: (decoded) => Effect.succeed(decoded),
+              }),
+            ),
+          onSuccess: Effect.succeed,
+        }),
+      )
+    }
+    return decode.pipe(Effect.mapError((error) => new Tool.Error({ message: `Invalid tool input: ${error.message}` })))
+  }
   if (isStandardSchema(schema)) return validateStandard(schema, value, "Invalid tool input")
   return Effect.succeed(value)
+}
+
+const hasTransformations = (schema: Tool.ValueSchema<any>) => {
+  // A schema AST carries an `encoding` node only when it transforms or defaults a value
+  // between its encoded and type views. Transformations can be nested inside containers
+  // (struct fields, array elements, unions, tuples, records), so walk the AST. Recursive
+  // schemas reuse node objects, so track visited nodes to terminate. Inspecting the AST can
+  // itself throw for schemas with decoding defaults, so treat any inspection failure as
+  // "has transformations" and keep the plain host decode (never use the fallback) there.
+  try {
+    const ast = (schema as { ast?: unknown }).ast
+    if (typeof ast !== "object" || ast === null) return true
+    const visited = new Set<unknown>()
+    const walk = (node: unknown): boolean => {
+      if (typeof node !== "object" || node === null || visited.has(node)) return false
+      visited.add(node)
+      const record = node as Record<string, unknown>
+      if (record.encoding !== undefined) return true
+      const signatures = record.propertySignatures
+      if (Array.isArray(signatures))
+        for (const signature of signatures)
+          if (walk((signature as { type?: unknown }).type)) return true
+      const indexSignatures = record.indexSignatures
+      if (Array.isArray(indexSignatures))
+        for (const signature of indexSignatures)
+          if (walk((signature as { type?: unknown }).type)) return true
+      if (Array.isArray(record.types)) for (const type of record.types) if (walk(type)) return true
+      if (Array.isArray(record.elements)) for (const element of record.elements) if (walk(element)) return true
+      if (record.type !== undefined && walk(record.type)) return true
+      if (record.key !== undefined && walk(record.key)) return true
+      if (record.value !== undefined && walk(record.value)) return true
+      return false
+    }
+    return walk(ast)
+  } catch {
+    return true
+  }
 }
 
 const encodeOutput = (schema: Tool.ValueSchema<any>, value: unknown) => {
