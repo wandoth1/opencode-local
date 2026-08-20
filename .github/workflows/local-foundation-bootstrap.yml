@@ -1,4 +1,4 @@
-name: Local foundation bootstrap
+name: Materialize local foundation wiring
 
 on:
   push:
@@ -11,9 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  apply-and-validate:
+  materialize-wiring:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - name: Check out working branch
         uses: actions/checkout@v4
@@ -21,60 +21,20 @@ jobs:
           ref: feature/local-foundation
           fetch-depth: 0
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
+      - name: Apply deterministic wiring
+        run: python3 scripts/local-foundation-wire.py
 
-      - name: Apply staged source patches
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          patches=(scripts/local-foundation-patches/*.patch)
-          test ${#patches[@]} -gt 0
-          for patch in "${patches[@]}"; do
-            echo "Applying ${patch}"
-            git apply --check "${patch}"
-            git apply "${patch}"
-          done
-
-      - name: Install workspace dependencies
-        run: bun install --frozen-lockfile --ignore-scripts
-
-      - name: Format changed implementation
-        run: |
-          bun x prettier --write \
-            packages/opencode/src/local \
-            packages/opencode/src/plugin/ollama.ts \
-            packages/opencode/src/cli/cmd/local.ts \
-            packages/opencode/src/plugin/index.ts \
-            packages/opencode/src/index.ts \
-            packages/opencode/test/local \
-            docs/local-foundation
-
-      - name: Run local-runtime tests
-        working-directory: packages/opencode
-        run: bun test --timeout 30000 test/local
-
-      - name: Typecheck OpenCode package
-        working-directory: packages/opencode
-        run: bun run typecheck
-
-      - name: Commit validated implementation
+      - name: Commit wiring
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            docs/local-foundation \
-            packages/opencode/src/local \
-            packages/opencode/src/plugin/ollama.ts \
-            packages/opencode/src/plugin/index.ts \
-            packages/opencode/src/cli/cmd/local.ts \
-            packages/opencode/src/index.ts \
-            packages/opencode/test/local
+          git add packages/opencode/src/plugin/index.ts packages/opencode/src/index.ts
           git diff --cached --check
-          git commit -m "feat(local): add native Ollama runtime foundation"
+          if git diff --cached --quiet; then
+            echo "Wiring is already materialized."
+            exit 0
+          fi
+          git commit -m "feat(local): register Ollama runtime and local CLI"
           git push origin HEAD:feature/local-foundation
