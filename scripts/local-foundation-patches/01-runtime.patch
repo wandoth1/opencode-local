@@ -1,0 +1,426 @@
+diff --git a/packages/opencode/src/local/context-budget.ts b/packages/opencode/src/local/context-budget.ts
+new file mode 100644
+index 0000000..e802000
+--- /dev/null
++++ b/packages/opencode/src/local/context-budget.ts
+@@ -0,0 +1,214 @@
++import {
++  GIB,
++  MIB,
++  clamp,
++  finitePositive,
++  type ContextRecommendation,
++  type HardwareSnapshot,
++  type LocalModelMetadata,
++} from "./runtime"
++
++const CONTEXT_STEPS = [
++  262_144,
++  196_608,
++  131_072,
++  98_304,
++  65_536,
++  49_152,
++  32_768,
++  24_576,
++  16_384,
++  12_288,
++  8_192,
++  6_144,
++  4_096,
++  2_048,
++]
++
++const DEFAULT_CONTEXT = 16_384
++const MIN_CONTEXT = 4_096
++const DEFAULT_OUTPUT = 8_192
++const MODEL_RUNTIME_OVERHEAD = 384 * MIB
++const MIN_GPU_RESERVE = 768 * MIB
++const MODEL_SIZE_MULTIPLIER = 1.08
++const KV_SAFETY_FACTOR = 0.72
++
++interface ArchitectureShape {
++  blockCount?: number
++  embeddingLength?: number
++  headCount?: number
++  headCountKv?: number
++}
++
++export interface ContextBudgetInput {
++  model: LocalModelMetadata
++  hardware?: HardwareSnapshot
++  requestedContextTokens?: number
++  loadedSizeVramBytes?: number
++  kvCacheBytesPerElement?: number
++}
++
++function numberAt(info: Record<string, unknown>, key: string): number | undefined {
++  return finitePositive(info[key])
++}
++
++function architectureShape(model: LocalModelMetadata): ArchitectureShape {
++  const info = model.modelInfo
++  const architecture =
++    (typeof info["general.architecture"] === "string" ? info["general.architecture"] : undefined) ?? model.family
++  if (!architecture) return {}
++  return {
++    blockCount: numberAt(info, `${architecture}.block_count`),
++    embeddingLength: numberAt(info, `${architecture}.embedding_length`),
++    headCount: numberAt(info, `${architecture}.attention.head_count`),
++    headCountKv:
++      numberAt(info, `${architecture}.attention.head_count_kv`) ?? numberAt(info, `${architecture}.attention.head_count`),
++  }
++}
++
++export function estimateKvBytesPerToken(model: LocalModelMetadata, bytesPerElement = 2): number | undefined {
++  const shape = architectureShape(model)
++  if (!shape.blockCount || !shape.embeddingLength || !shape.headCount || !shape.headCountKv) return undefined
++  const headDimension = shape.embeddingLength / shape.headCount
++  const result = 2 * shape.blockCount * shape.headCountKv * headDimension * bytesPerElement
++  return Number.isFinite(result) && result > 0 ? Math.ceil(result) : undefined
++}
++
++export function extractContextLength(modelInfo: Record<string, unknown>, parameters?: string): number | undefined {
++  const candidates = Object.entries(modelInfo)
++    .filter(([key]) => key.endsWith(".context_length"))
++    .flatMap(([, value]) => {
++      const parsed = finitePositive(value)
++      return parsed === undefined ? [] : [parsed]
++    })
++
++  const configured = /(?:^|\n)\s*num_ctx\s+(\d+)/i.exec(parameters ?? "")?.[1]
++  const configuredValue = finitePositive(configured)
++  if (configuredValue !== undefined) candidates.push(configuredValue)
++  if (candidates.length === 0) return undefined
++  return Math.max(...candidates)
++}
++
++function roundContextDown(tokens: number, minimum = MIN_CONTEXT) {
++  const rounded = CONTEXT_STEPS.find((step) => step <= tokens)
++  return Math.max(minimum, rounded ?? minimum)
++}
++
++function estimatedFileSize(model: LocalModelMetadata) {
++  if (model.fileSizeBytes > 0) return model.fileSizeBytes
++  const match = /^\s*([0-9]+(?:\.[0-9]+)?)\s*([BM])?\s*$/i.exec(model.parameterSize ?? "")
++  if (!match) return 4 * GIB
++  const scale = match[2]?.toUpperCase() === "M" ? 1_000_000 : 1_000_000_000
++  const parameters = Number(match[1]) * scale
++  const quantization = model.quantization?.toUpperCase() ?? ""
++  const quantizedBits = /Q([2-8])/.exec(quantization)?.[1]
++  const bitsPerParameter = quantizedBits
++    ? Number(quantizedBits) + 0.5
++    : quantization.includes("F32")
++      ? 32
++      : quantization.includes("F16") || quantization.includes("BF16")
++        ? 16
++        : 8
++  return Math.ceil((parameters * bitsPerParameter * 1.15) / 8)
++}
++
++function gpuBudget(hardware: HardwareSnapshot | undefined) {
++  const gpus = hardware?.nvidiaGpus ?? []
++  if (gpus.length === 0) return undefined
++  return {
++    total: gpus.reduce((sum, gpu) => sum + gpu.memoryTotalBytes, 0),
++    free: gpus.reduce((sum, gpu) => sum + gpu.memoryFreeBytes, 0),
++    count: gpus.length,
++  }
++}
++
++function outputBudget(context: number) {
++  return roundContextDown(Math.min(DEFAULT_OUTPUT, Math.max(2_048, Math.floor(context / 4))), 2_048)
++}
++
++export function recommendContext(input: ContextBudgetInput): ContextRecommendation {
++  const modelMaxContextTokens = Math.max(1, Math.floor(input.model.contextLength ?? DEFAULT_CONTEXT))
++  const minimumContextTokens = Math.min(MIN_CONTEXT, modelMaxContextTokens)
++  const kvBytesPerToken = estimateKvBytesPerToken(input.model, input.kvCacheBytesPerElement ?? 2)
++  const estimatedModelVramBytes =
++    input.loadedSizeVramBytes ?? Math.ceil(estimatedFileSize(input.model) * MODEL_SIZE_MULTIPLIER + MODEL_RUNTIME_OVERHEAD)
++  const budget = gpuBudget(input.hardware)
++  const reasons: string[] = []
++
++  let safeContext = Math.min(modelMaxContextTokens, DEFAULT_CONTEXT)
++  let availableVramBytes: number | undefined
++  let estimatedKvVramBytes: number | undefined
++  let expectedCpuOffload = false
++  let confidence: ContextRecommendation["confidence"] = "low"
++
++  if (!budget) {
++    reasons.push("No NVIDIA telemetry was available; using a conservative local default.")
++  } else {
++    const reserve = Math.max(MIN_GPU_RESERVE, Math.floor(budget.total * 0.08))
++    availableVramBytes = Math.max(0, budget.free - estimatedModelVramBytes - reserve)
++    expectedCpuOffload = estimatedModelVramBytes + reserve > budget.free
++    if (budget.count > 1) reasons.push("VRAM was aggregated across multiple GPUs; actual Ollama placement may differ.")
++
++    if (expectedCpuOffload) {
++      safeContext = minimumContextTokens
++      reasons.push("The model is unlikely to fit completely in currently free VRAM, so CPU offload is expected.")
++      confidence = "medium"
++    } else if (kvBytesPerToken) {
++      const rawTokens = Math.floor((availableVramBytes * KV_SAFETY_FACTOR) / kvBytesPerToken)
++      safeContext = roundContextDown(clamp(rawTokens, minimumContextTokens, modelMaxContextTokens), minimumContextTokens)
++      estimatedKvVramBytes = safeContext * kvBytesPerToken
++      reasons.push("Context was limited by the estimated KV cache and currently free NVIDIA VRAM.")
++      confidence = budget.count === 1 ? "high" : "medium"
++    } else {
++      safeContext = Math.min(modelMaxContextTokens, DEFAULT_CONTEXT)
++      reasons.push("Model architecture metadata was incomplete, so KV cache size could not be calculated exactly.")
++      confidence = "medium"
++    }
++  }
++
++  const requested = finitePositive(input.requestedContextTokens)
++  const recommendedContextTokens = requested
++    ? roundContextDown(Math.min(requested, modelMaxContextTokens), minimumContextTokens)
++    : safeContext
++
++  if (requested) {
++    if (requested > safeContext) {
++      reasons.push("A user context override exceeds the hardware-safe estimate and may cause offload or allocation failure.")
++      expectedCpuOffload = expectedCpuOffload || Boolean(budget)
++    } else {
++      reasons.push("A user context override was applied within the hardware-safe estimate.")
++    }
++  }
++
++  const recommendedOutputTokens = Math.min(recommendedContextTokens - 1, outputBudget(recommendedContextTokens))
++  const recommendedHistoryTokens = Math.max(1, Math.floor((recommendedContextTokens - recommendedOutputTokens) / 4))
++
++  return {
++    modelMaxContextTokens,
++    recommendedContextTokens,
++    recommendedOutputTokens,
++    recommendedHistoryTokens,
++    estimatedModelVramBytes,
++    estimatedKvBytesPerToken: kvBytesPerToken,
++    estimatedKvVramBytes,
++    availableVramBytes,
++    expectedCpuOffload,
++    confidence,
++    reasons,
++  }
++}
++
++export function contextRiskLabel(recommendation: ContextRecommendation): "good" | "constrained" | "offload" {
++  if (recommendation.expectedCpuOffload) return "offload"
++  if (recommendation.recommendedContextTokens < 16_384 || recommendation.confidence === "low") return "constrained"
++  return "good"
++}
++
++export const ContextBudgetDefaults = {
++  defaultContextTokens: DEFAULT_CONTEXT,
++  minimumContextTokens: MIN_CONTEXT,
++  defaultOutputTokens: DEFAULT_OUTPUT,
++  modelRuntimeOverheadBytes: MODEL_RUNTIME_OVERHEAD,
++  minimumGpuReserveBytes: MIN_GPU_RESERVE,
++  referenceConsumerGpuBytes: 12 * GIB,
++} as const
+diff --git a/packages/opencode/src/local/hardware.ts b/packages/opencode/src/local/hardware.ts
+new file mode 100644
+index 0000000..7433549
+--- /dev/null
++++ b/packages/opencode/src/local/hardware.ts
+@@ -0,0 +1,103 @@
++import os from "os"
++import { spawnSync } from "child_process"
++import { MIB, type HardwareSnapshot, type NvidiaGpuSnapshot } from "./runtime"
++
++const NVIDIA_QUERY = [
++  "--query-gpu=index,name,driver_version,memory.total,memory.free,memory.used,utilization.gpu",
++  "--format=csv,noheader,nounits",
++]
++
++function parseCsvLine(line: string): string[] {
++  const values: string[] = []
++  let current = ""
++  let quoted = false
++
++  for (let index = 0; index < line.length; index += 1) {
++    const character = line[index]
++    if (character === '"') {
++      if (quoted && line[index + 1] === '"') {
++        current += '"'
++        index += 1
++        continue
++      }
++      quoted = !quoted
++      continue
++    }
++    if (character === "," && !quoted) {
++      values.push(current.trim())
++      current = ""
++      continue
++    }
++    current += character
++  }
++
++  values.push(current.trim())
++  return values
++}
++
++function numberOrUndefined(raw: string | undefined): number | undefined {
++  if (!raw || raw === "N/A" || raw === "[Not Supported]") return undefined
++  const value = Number(raw)
++  return Number.isFinite(value) ? value : undefined
++}
++
++export function parseNvidiaSmiCsv(output: string, cudaVersion?: string): NvidiaGpuSnapshot[] {
++  return output
++    .split(/\r?\n/)
++    .map((line) => line.trim())
++    .filter(Boolean)
++    .flatMap((line) => {
++      const [indexRaw, name, driverVersion, totalRaw, freeRaw, usedRaw, utilizationRaw] = parseCsvLine(line)
++      const index = numberOrUndefined(indexRaw)
++      const total = numberOrUndefined(totalRaw)
++      const free = numberOrUndefined(freeRaw)
++      const used = numberOrUndefined(usedRaw)
++      if (index === undefined || !name || total === undefined || free === undefined || used === undefined) return []
++      return [
++        {
++          index,
++          name,
++          driverVersion: driverVersion || undefined,
++          cudaVersion,
++          memoryTotalBytes: total * MIB,
++          memoryFreeBytes: free * MIB,
++          memoryUsedBytes: used * MIB,
++          utilizationPercent: numberOrUndefined(utilizationRaw),
++        },
++      ]
++    })
++}
++
++export function parseCudaVersion(output: string): string | undefined {
++  return /CUDA Version:\s*([0-9.]+)/i.exec(output)?.[1]
++}
++
++function runNvidiaSmi(args: string[]) {
++  const result = spawnSync("nvidia-smi", args, {
++    encoding: "utf8",
++    windowsHide: true,
++    timeout: 3_000,
++  })
++  if (result.error || result.status !== 0) return undefined
++  return String(result.stdout ?? "")
++}
++
++export function detectNvidiaGpus(): NvidiaGpuSnapshot[] {
++  const summary = runNvidiaSmi([])
++  const csv = runNvidiaSmi(NVIDIA_QUERY)
++  if (!csv) return []
++  return parseNvidiaSmiCsv(csv, summary ? parseCudaVersion(summary) : undefined)
++}
++
++export function detectHardware(): HardwareSnapshot {
++  const cpus = os.cpus()
++  return {
++    platform: process.platform,
++    architecture: process.arch,
++    cpuModel: cpus[0]?.model ?? "unknown",
++    cpuCount: cpus.length,
++    systemMemoryTotalBytes: os.totalmem(),
++    systemMemoryFreeBytes: os.freemem(),
++    nvidiaGpus: detectNvidiaGpus(),
++  }
++}
+diff --git a/packages/opencode/src/local/runtime.ts b/packages/opencode/src/local/runtime.ts
+new file mode 100644
+index 0000000..ee51c7e
+--- /dev/null
++++ b/packages/opencode/src/local/runtime.ts
+@@ -0,0 +1,91 @@
++export const MIB = 1024 * 1024
++export const GIB = 1024 * MIB
++
++export type LocalBackend = "ollama" | "llama.cpp"
++
++export interface NvidiaGpuSnapshot {
++  index: number
++  name: string
++  driverVersion?: string
++  cudaVersion?: string
++  memoryTotalBytes: number
++  memoryFreeBytes: number
++  memoryUsedBytes: number
++  utilizationPercent?: number
++}
++
++export interface HardwareSnapshot {
++  platform: string
++  architecture: string
++  cpuModel: string
++  cpuCount: number
++  systemMemoryTotalBytes: number
++  systemMemoryFreeBytes: number
++  nvidiaGpus: NvidiaGpuSnapshot[]
++}
++
++export interface LocalModelMetadata {
++  id: string
++  family?: string
++  families: string[]
++  format?: string
++  parameterSize?: string
++  quantization?: string
++  fileSizeBytes: number
++  contextLength?: number
++  capabilities: string[]
++  modelInfo: Record<string, unknown>
++}
++
++export interface RuntimeCapabilities {
++  backend: LocalBackend
++  endpoint: string
++  version?: string
++  nativeTransport: boolean
++  modelDiscovery: boolean
++  modelIntrospection: boolean
++  runtimeIntrospection: boolean
++}
++
++export interface ContextRecommendation {
++  modelMaxContextTokens: number
++  recommendedContextTokens: number
++  recommendedOutputTokens: number
++  recommendedHistoryTokens: number
++  estimatedModelVramBytes: number
++  estimatedKvBytesPerToken?: number
++  estimatedKvVramBytes?: number
++  availableVramBytes?: number
++  expectedCpuOffload: boolean
++  confidence: "high" | "medium" | "low"
++  reasons: string[]
++}
++
++export interface LocalModelProfile {
++  metadata: LocalModelMetadata
++  context: ContextRecommendation
++  loaded?: {
++    sizeBytes?: number
++    sizeVramBytes?: number
++    contextLength?: number
++    expiresAt?: string
++  }
++}
++
++export function finitePositive(value: unknown): number | undefined {
++  const number = typeof value === "number" ? value : Number(value)
++  if (!Number.isFinite(number) || number <= 0) return undefined
++  return number
++}
++
++export function clamp(value: number, min: number, max: number) {
++  return Math.min(max, Math.max(min, value))
++}
++
++export function formatBytes(bytes: number | undefined): string {
++  if (bytes === undefined || !Number.isFinite(bytes)) return "unknown"
++  if (bytes >= GIB) return `${(bytes / GIB).toFixed(2)} GiB`
++  if (bytes >= MIB) return `${(bytes / MIB).toFixed(0)} MiB`
++  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KiB`
++  return `${Math.round(bytes)} B`
++}
