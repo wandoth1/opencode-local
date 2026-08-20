@@ -60,6 +60,17 @@ test("reduces context when a 12 GiB GPU has limited VRAM headroom", () => {
   expect(recommendation.confidence).toBe("high")
 })
 
+test("does not subtract an already-loaded model twice from free VRAM", () => {
+  const recommendation = recommendContext({
+    model,
+    hardware: hardware(2.5),
+    loadedSizeVramBytes: 9 * GIB,
+  })
+  expect(recommendation.recommendedContextTokens).toBeGreaterThanOrEqual(8_192)
+  expect(recommendation.expectedCpuOffload).toBe(false)
+  expect(recommendation.reasons.some((reason) => reason.includes("already loaded"))).toBe(true)
+})
+
 test("flags expected offload when the model does not fit", () => {
   const recommendation = recommendContext({ model, hardware: hardware(7) })
   expect(recommendation.recommendedContextTokens).toBe(4_096)
