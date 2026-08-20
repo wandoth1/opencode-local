@@ -69,6 +69,31 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isInteger(number) && number > 0 ? number : undefined
 }
 
+function cacheFingerprint(value: unknown) {
+  const seen = new WeakSet<object>()
+  const normalize = (current: unknown): unknown => {
+    if (current === undefined) return "[undefined]"
+    if (typeof current === "function") return `[function:${current.name || "anonymous"}]`
+    if (current === null || typeof current !== "object") return current
+    if (seen.has(current)) return "[circular]"
+    seen.add(current)
+    if (Array.isArray(current)) return current.map(normalize)
+    return Object.fromEntries(
+      Object.entries(current)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, normalize(entry)]),
+    )
+  }
+
+  const text = JSON.stringify(normalize(value))
+  let hash = 2_166_136_261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16_777_619)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
 function mutableConfig(config: Config): MutableProviderConfig {
   return config as unknown as MutableProviderConfig
 }
@@ -203,10 +228,17 @@ async function inspect(config: Config, settings: OllamaSettings): Promise<Ollama
 export function discoverOllama(config: Config, settings = resolveOllamaSettings(config)) {
   const key = JSON.stringify({
     host: settings.host,
-    apiKey: settings.apiKey ? "configured" : "none",
+    credential: cacheFingerprint(settings.apiKey ?? ""),
+    headers: cacheFingerprint(settings.headers ?? {}),
+    timeoutMs: settings.timeoutMs,
     numCtx: settings.numCtx,
+    keepAlive: settings.keepAlive,
     nativeTransport: settings.nativeTransport,
     autoDiscover: settings.autoDiscover,
+    forceToolCall: settings.forceToolCall,
+    forceReasoning: settings.forceReasoning,
+    forceVision: settings.forceVision,
+    configuredModels: cacheFingerprint(staticModels(config)),
   })
   const now = Date.now()
   const current = cache.get(key)
