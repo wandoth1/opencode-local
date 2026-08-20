@@ -23,17 +23,35 @@ export interface OllamaSettings {
   forceVision?: boolean
 }
 
+type ProviderModelConfig = {
+  limit?: {
+    context?: number
+    output?: number
+  }
+  [key: string]: unknown
+}
+
+type ProviderConfig = {
+  name?: string
+  npm?: string
+  api?: string
+  options?: Record<string, any>
+  models?: Record<string, ProviderModelConfig>
+  [key: string]: unknown
+}
+
+type MutableProviderConfig = Config & {
+  provider?: Record<string, ProviderConfig>
+}
+
 export interface OllamaIntegrationSnapshot {
   settings: OllamaSettings
   version?: string
   hardware: HardwareSnapshot
-  models: Record<string, OllamaProviderModel | ProviderConfig>
+  models: Record<string, OllamaProviderModel | ProviderModelConfig>
   profiles: Record<string, LocalModelProfile>
   capabilities: RuntimeCapabilities
 }
-
-type MutableConfig = Config & Record<string, any>
-type ProviderConfig = Record<string, any>
 
 const cache = new Map<string, { expires: number; promise: Promise<OllamaIntegrationSnapshot | undefined> }>()
 let latestSnapshot: OllamaIntegrationSnapshot | undefined
@@ -49,11 +67,17 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isInteger(number) && number > 0 ? number : undefined
 }
 
-function providerOptions(config: MutableConfig): ProviderConfig {
-  return config.provider?.[PROVIDER_ID]?.options ?? {}
+function configuredProvider(config: Config): ProviderConfig {
+  const provider = (config as MutableProviderConfig).provider?.[PROVIDER_ID]
+  return provider && typeof provider === "object" ? provider : {}
 }
 
-export function resolveOllamaSettings(config: MutableConfig): OllamaSettings {
+function providerOptions(config: Config): Record<string, any> {
+  const options = configuredProvider(config).options
+  return options && typeof options === "object" ? options : {}
+}
+
+export function resolveOllamaSettings(config: Config): OllamaSettings {
   const options = providerOptions(config)
   const configuredHost = options.host ?? options.nativeBaseURL ?? options.baseURL
   const environmentHost = process.env.OPENCODE_OLLAMA_HOST ?? process.env.OLLAMA_HOST
@@ -85,19 +109,25 @@ export function resolveOllamaSettings(config: MutableConfig): OllamaSettings {
   }
 }
 
-function providerAllowed(config: MutableConfig) {
+function providerAllowed(config: Config) {
   if (process.env.OPENCODE_LOCAL_DISABLE === "1") return false
-  if (Array.isArray(config.disabled_providers) && config.disabled_providers.includes(PROVIDER_ID)) return false
-  if (Array.isArray(config.enabled_providers) && !config.enabled_providers.includes(PROVIDER_ID)) return false
+  const disabled = (config as { disabled_providers?: unknown }).disabled_providers
+  if (Array.isArray(disabled) && disabled.includes(PROVIDER_ID)) return false
+  const enabled = (config as { enabled_providers?: unknown }).enabled_providers
+  if (Array.isArray(enabled) && !enabled.includes(PROVIDER_ID)) return false
   return true
 }
 
-function staticModels(config: MutableConfig): Record<string, ProviderConfig> {
-  const models = config.provider?.[PROVIDER_ID]?.models
-  return models && typeof models === "object" ? (models as Record<string, ProviderConfig>) : {}
+function staticModels(config: Config): Record<string, ProviderModelConfig> {
+  const models = configuredProvider(config).models
+  return models && typeof models === "object" ? models : {}
 }
 
-async function inspect(config: MutableConfig, settings: OllamaSettings): Promise<OllamaIntegrationSnapshot | undefined> {
+function configuredContext(model: OllamaProviderModel | ProviderModelConfig): number | undefined {
+  return positiveInteger(model.limit?.context)
+}
+
+async function inspect(config: Config, settings: OllamaSettings): Promise<OllamaIntegrationSnapshot | undefined> {
   const configuredModels = staticModels(config)
   if (!settings.autoDiscover && Object.keys(configuredModels).length === 0) return undefined
   if (!settings.explicitHost && !isLoopbackOllamaHost(settings.host)) return undefined
@@ -126,9 +156,8 @@ async function inspect(config: MutableConfig, settings: OllamaSettings): Promise
   }
 
   const hardware = detectHardware()
-  const models: Record<string, OllamaProviderModel | ProviderConfig> = {}
+  const models: Record<string, OllamaProviderModel | ProviderModelConfig> = {}
   const profiles: Record<string, LocalModelProfile> = {}
-  const contexts: Record<string, number> = {}
 
   for (const item of discovered) {
     const built = buildOllamaModel(item, {
@@ -142,13 +171,9 @@ async function inspect(config: MutableConfig, settings: OllamaSettings): Promise
     })
     models[item.metadata.id] = built.model
     profiles[item.metadata.id] = built.profile
-    contexts[item.metadata.id] = built.profile.context.recommendedContextTokens
   }
 
-  for (const [id, model] of Object.entries(configuredModels)) {
-    models[id] = model
-    contexts[id] = settings.numCtx ?? positiveInteger(model.limit?.context) ?? contexts[id] ?? 16_384
-  }
+  for (const [id, model] of Object.entries(configuredModels)) models[id] = model
 
   if (Object.keys(models).length === 0) return undefined
   return {
@@ -169,7 +194,7 @@ async function inspect(config: MutableConfig, settings: OllamaSettings): Promise
   }
 }
 
-export function discoverOllama(config: MutableConfig, settings = resolveOllamaSettings(config)) {
+export function discoverOllama(config: Config, settings = resolveOllamaSettings(config)) {
   const key = JSON.stringify({
     host: settings.host,
     apiKey: settings.apiKey ? "configured" : "none",
@@ -188,7 +213,7 @@ export function discoverOllama(config: MutableConfig, settings = resolveOllamaSe
   return promise
 }
 
-function sdkOptions(options: ProviderConfig) {
+function sdkOptions(options: Record<string, any>) {
   const {
     host: _host,
     nativeBaseURL: _nativeBaseURL,
@@ -205,21 +230,22 @@ function sdkOptions(options: ProviderConfig) {
   return rest
 }
 
-export async function configureOllama(config: MutableConfig) {
+export async function configureOllama(config: Config) {
   if (!providerAllowed(config)) return
   const settings = resolveOllamaSettings(config)
   const snapshot = await discoverOllama(config, settings)
   if (!snapshot) return
 
-  const existing = (config.provider?.[PROVIDER_ID] ?? {}) as ProviderConfig
+  const mutable = config as MutableProviderConfig
+  const existing = configuredProvider(config)
   const existingOptions = providerOptions(config)
   const contexts = Object.fromEntries(
     Object.entries(snapshot.models).map(([id, model]) => [
       id,
-      settings.numCtx ?? snapshot.profiles[id]?.context.recommendedContextTokens ?? model.limit?.context ?? 16_384,
+      settings.numCtx ?? snapshot.profiles[id]?.context.recommendedContextTokens ?? configuredContext(model) ?? 16_384,
     ]),
   )
-  const baseFetch = typeof existingOptions.fetch === "function" ? existingOptions.fetch : fetch
+  const baseFetch = typeof existingOptions.fetch === "function" ? (existingOptions.fetch as typeof fetch) : fetch
   const transport = createOllamaNativeFetch({
     host: settings.host,
     contexts,
@@ -228,8 +254,8 @@ export async function configureOllama(config: MutableConfig) {
     fetch: baseFetch,
   })
 
-  config.provider = config.provider ?? {}
-  config.provider[PROVIDER_ID] = {
+  mutable.provider = mutable.provider ?? {}
+  mutable.provider[PROVIDER_ID] = {
     ...existing,
     name: existing.name ?? "Ollama (local)",
     npm: "@ai-sdk/openai-compatible",
