@@ -3,7 +3,7 @@ import { detectHardware } from "../hardware"
 import type { HardwareSnapshot, LocalModelProfile, RuntimeCapabilities } from "../runtime"
 import { OllamaClient, isLoopbackOllamaHost, normalizeOllamaHost } from "./client"
 import { buildOllamaModel, type OllamaProviderModel } from "./model"
-import { createOllamaNativeFetch } from "./transport"
+import { createOllamaNativeFetch, type FetchLike } from "./transport"
 
 const PROVIDER_ID = "ollama"
 const CACHE_TTL_MS = 30_000
@@ -31,12 +31,14 @@ type ProviderModelConfig = {
   [key: string]: unknown
 }
 
+type LocalProviderModelConfig = OllamaProviderModel | ProviderModelConfig
+
 type ProviderConfig = {
   name?: string
   npm?: string
   api?: string
   options?: Record<string, any>
-  models?: Record<string, ProviderModelConfig>
+  models?: Record<string, LocalProviderModelConfig>
   [key: string]: unknown
 }
 
@@ -48,7 +50,7 @@ export interface OllamaIntegrationSnapshot {
   settings: OllamaSettings
   version?: string
   hardware: HardwareSnapshot
-  models: Record<string, OllamaProviderModel | ProviderModelConfig>
+  models: Record<string, LocalProviderModelConfig>
   profiles: Record<string, LocalModelProfile>
   capabilities: RuntimeCapabilities
 }
@@ -122,12 +124,12 @@ function providerAllowed(config: Config) {
   return true
 }
 
-function staticModels(config: Config): Record<string, ProviderModelConfig> {
+function staticModels(config: Config): Record<string, LocalProviderModelConfig> {
   const models = configuredProvider(config).models
   return models && typeof models === "object" ? models : {}
 }
 
-function configuredContext(model: OllamaProviderModel | ProviderModelConfig): number | undefined {
+function configuredContext(model: LocalProviderModelConfig): number | undefined {
   return positiveInteger(model.limit?.context)
 }
 
@@ -160,7 +162,7 @@ async function inspect(config: Config, settings: OllamaSettings): Promise<Ollama
   }
 
   const hardware = detectHardware()
-  const models: Record<string, OllamaProviderModel | ProviderModelConfig> = {}
+  const models: Record<string, LocalProviderModelConfig> = {}
   const profiles: Record<string, LocalModelProfile> = {}
 
   for (const item of discovered) {
@@ -249,7 +251,7 @@ export async function configureOllama(config: Config) {
       settings.numCtx ?? snapshot.profiles[id]?.context.recommendedContextTokens ?? configuredContext(model) ?? 16_384,
     ]),
   )
-  const baseFetch = typeof existingOptions.fetch === "function" ? (existingOptions.fetch as typeof fetch) : fetch
+  const baseFetch: FetchLike = typeof existingOptions.fetch === "function" ? existingOptions.fetch : fetch
   const transport = createOllamaNativeFetch({
     host: settings.host,
     contexts,
