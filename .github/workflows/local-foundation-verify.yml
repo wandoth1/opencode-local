@@ -12,22 +12,36 @@ on:
       - "packages/opencode/src/plugin/ollama.ts"
       - "packages/opencode/src/cli/cmd/local.ts"
       - "packages/opencode/test/local/**"
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/local-foundation-verify.yml"
+      - "scripts/local-foundation-wire.py"
+      - "docs/local-foundation/**"
+      - "packages/opencode/src/local/**"
+      - "packages/opencode/src/plugin/ollama.ts"
+      - "packages/opencode/src/cli/cmd/local.ts"
+      - "packages/opencode/test/local/**"
 
 permissions:
   contents: write
 
 concurrency:
-  group: local-foundation-${{ github.ref }}
+  group: local-foundation-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify-and-wire:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TARGET_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
 
       - name: Apply deterministic wiring
@@ -81,4 +95,4 @@ jobs:
             packages/opencode/test/local \
             docs/local-foundation
           git commit -m "chore(local): wire and format verified foundation [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:${TARGET_BRANCH}"
