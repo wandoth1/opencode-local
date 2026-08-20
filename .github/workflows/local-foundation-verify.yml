@@ -6,11 +6,12 @@ on:
       - dev
     paths:
       - ".github/workflows/local-foundation-verify.yml"
-      - "scripts/local-foundation-wire.py"
       - "docs/local-foundation/**"
       - "packages/opencode/src/local/**"
       - "packages/opencode/src/plugin/ollama.ts"
+      - "packages/opencode/src/plugin/index.ts"
       - "packages/opencode/src/cli/cmd/local.ts"
+      - "packages/opencode/src/index.ts"
       - "packages/opencode/test/local/**"
 
 permissions:
@@ -24,17 +25,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      TARGET_BRANCH: ${{ github.event.pull_request.head.ref }}
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 1
-
-      - name: Apply deterministic wiring
-        run: python3 scripts/local-foundation-wire.py
 
       - name: Validate patch whitespace
         run: git diff --check
@@ -47,9 +42,9 @@ jobs:
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
 
-      - name: Format changed TypeScript
+      - name: Verify formatting
         run: |
-          bunx prettier@3.6.2 --write \
+          bunx prettier@3.6.2 --check \
             packages/opencode/src/local \
             packages/opencode/src/plugin/ollama.ts \
             packages/opencode/src/cli/cmd/local.ts \
@@ -59,8 +54,6 @@ jobs:
             docs/local-foundation
 
       - name: Typecheck OpenCode
-        id: typecheck
-        continue-on-error: true
         shell: bash
         working-directory: packages/opencode
         run: |
@@ -68,9 +61,6 @@ jobs:
           bun run typecheck 2>&1 | tee ../../docs/local-foundation/ci-typecheck.log
 
       - name: Run local foundation tests
-        id: tests
-        if: steps.typecheck.outcome == 'success'
-        continue-on-error: true
         shell: bash
         working-directory: packages/opencode
         run: |
@@ -87,11 +77,3 @@ jobs:
             docs/local-foundation/ci-tests.log
           if-no-files-found: ignore
           retention-days: 3
-
-      - name: Verify generated wiring and formatting are clean
-        if: steps.typecheck.outcome == 'success' && steps.tests.outcome == 'success'
-        run: git diff --check
-
-      - name: Fail verification when checks failed
-        if: steps.typecheck.outcome == 'failure' || steps.tests.outcome == 'failure'
-        run: exit 1
