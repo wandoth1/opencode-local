@@ -89,3 +89,38 @@ export function formatBytes(bytes: number | undefined): string {
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KiB`
   return `${Math.round(bytes)} B`
 }
+
+function sensitiveKey(key: string) {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase()
+  return (
+    normalized === "headers" ||
+    normalized === "header" ||
+    normalized === "cookie" ||
+    normalized === "cookies" ||
+    normalized.includes("apikey") ||
+    normalized.includes("authorization") ||
+    normalized.includes("accesstoken") ||
+    normalized.includes("refreshtoken") ||
+    normalized.endsWith("token") ||
+    normalized.includes("password") ||
+    normalized.includes("secret")
+  )
+}
+
+export function redactSecrets<T>(value: T): T {
+  const seen = new WeakSet<object>()
+
+  const visit = (current: unknown, key?: string): unknown => {
+    if (key && sensitiveKey(key)) return "[redacted]"
+    if (current === null || current === undefined) return current
+    if (typeof current === "function") return "[function]"
+    if (typeof current !== "object") return current
+    if (seen.has(current)) return "[circular]"
+    seen.add(current)
+
+    if (Array.isArray(current)) return current.map((item) => visit(item))
+    return Object.fromEntries(Object.entries(current).map(([entryKey, entry]) => [entryKey, visit(entry, entryKey)]))
+  }
+
+  return visit(value) as T
+}
