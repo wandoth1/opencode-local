@@ -13,7 +13,7 @@ test("recursively redacts credentials without hiding ordinary timeout fields", (
       password: "password-secret",
       model: "qwen3-coder:8b",
     },
-  })
+  }) as any
 
   expect(report.settings.apiKey).toBe("[redacted]")
   expect(report.settings.headers).toBe("[redacted]")
