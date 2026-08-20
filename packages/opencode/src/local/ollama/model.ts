@@ -106,6 +106,7 @@ export function buildOllamaModel(
         high: { reasoningEffort: "high" },
       }
     : {}
+  const interleaved: OllamaProviderModel["interleaved"] = reasoning ? { field: "reasoning" } : false
 
   const result: OllamaProviderModel = {
     name,
@@ -116,7 +117,7 @@ export function buildOllamaModel(
     reasoning,
     attachment: vision,
     tool_call: toolcall,
-    interleaved: reasoning ? { field: "reasoning" } : false,
+    interleaved,
     cost: {
       input: 0,
       output: 0,
