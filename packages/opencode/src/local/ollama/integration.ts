@@ -40,7 +40,7 @@ type ProviderConfig = {
   [key: string]: unknown
 }
 
-type MutableProviderConfig = Config & {
+type MutableProviderConfig = {
   provider?: Record<string, ProviderConfig>
 }
 
@@ -67,8 +67,12 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isInteger(number) && number > 0 ? number : undefined
 }
 
+function mutableConfig(config: Config): MutableProviderConfig {
+  return config as unknown as MutableProviderConfig
+}
+
 function configuredProvider(config: Config): ProviderConfig {
-  const provider = (config as MutableProviderConfig).provider?.[PROVIDER_ID]
+  const provider = mutableConfig(config).provider?.[PROVIDER_ID]
   return provider && typeof provider === "object" ? provider : {}
 }
 
@@ -236,7 +240,7 @@ export async function configureOllama(config: Config) {
   const snapshot = await discoverOllama(config, settings)
   if (!snapshot) return
 
-  const mutable = config as MutableProviderConfig
+  const mutable = mutableConfig(config)
   const existing = configuredProvider(config)
   const existingOptions = providerOptions(config)
   const contexts = Object.fromEntries(
