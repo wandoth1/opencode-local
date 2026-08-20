@@ -1,7 +1,7 @@
 import type { Argv } from "yargs"
 import { Effect } from "effect"
 import { effectCmd, fail } from "../effect-cmd"
-import { formatBytes } from "@/local/runtime"
+import { formatBytes, redactSecrets } from "@/local/runtime"
 import { contextRiskLabel } from "@/local/context-budget"
 import { OllamaClient } from "@/local/ollama/client"
 import { OllamaIntegration } from "@/local/ollama/integration"
@@ -55,10 +55,11 @@ function printDoctor(snapshot: NonNullable<Awaited<ReturnType<typeof OllamaInteg
       console.log(`${selected} ${id}: configured manually (${model.limit?.context ?? "unknown"} context)`)
       continue
     }
+    const loaded = profile.loaded?.sizeVramBytes ? ` · loaded ${formatBytes(profile.loaded.sizeVramBytes)}` : ""
     console.log(
-      `${selected} ${id}: ${profile.metadata.parameterSize ?? "?"} ${profile.metadata.quantization ?? ""} · context ${profile.context.recommendedContextTokens} · ${contextRiskLabel(profile.context)}`,
+      `${selected} ${id}: ${profile.metadata.parameterSize ?? "?"} ${profile.metadata.quantization ?? ""} · context ${profile.context.recommendedContextTokens} · ${contextRiskLabel(profile.context)}${loaded}`,
     )
-    if (profile.context.expectedCpuOffload) console.log("    warning: CPU offload is expected with current free VRAM")
+    if (profile.context.expectedCpuOffload) console.log("    warning: CPU offload is expected with current VRAM capacity")
   }
 }
 
@@ -96,6 +97,13 @@ const DoctorCommand = effectCmd({
         describe: "emit machine-readable JSON",
       }),
   handler: Effect.fn("Cli.local.doctor")(function* (args: DoctorArgs) {
+    if (args.numCtx !== undefined && (!Number.isInteger(args.numCtx) || args.numCtx <= 0)) {
+      return yield* fail("--num-ctx must be a positive integer")
+    }
+    if (args.outputTokens !== undefined && (!Number.isInteger(args.outputTokens) || args.outputTokens <= 0)) {
+      return yield* fail("--output-tokens must be a positive integer")
+    }
+
     const config = {
       provider: {
         ollama: {
@@ -136,15 +144,17 @@ const DoctorCommand = effectCmd({
     }
 
     if (args.json) {
-      const safeSnapshot = {
-        ...snapshot,
-        settings: {
-          ...snapshot.settings,
-          apiKey: snapshot.settings.apiKey ? "[redacted]" : undefined,
-          headers: snapshot.settings.headers ? "[redacted]" : undefined,
-        },
-      }
-      console.log(JSON.stringify({ ...safeSnapshot, benchmark }, null, 2))
+      console.log(
+        JSON.stringify(
+          redactSecrets({
+            generatedAt: new Date().toISOString(),
+            snapshot,
+            benchmark,
+          }),
+          null,
+          2,
+        ),
+      )
       return
     }
 
