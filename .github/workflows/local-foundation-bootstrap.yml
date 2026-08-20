@@ -1,4 +1,4 @@
-name: Materialize local foundation wiring
+name: Remove local foundation bootstrap artifacts
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  materialize-wiring:
+  cleanup:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -21,20 +21,21 @@ jobs:
           ref: feature/local-foundation
           fetch-depth: 0
 
-      - name: Apply deterministic wiring
-        run: python3 scripts/local-foundation-wire.py
+      - name: Remove temporary materialization files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf scripts/local-foundation-patches
+          rm -f scripts/local-foundation-wire.py
+          rm -f .github/workflows/local-foundation-bootstrap.yml
 
-      - name: Commit wiring
+      - name: Commit cleanup
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/opencode/src/plugin/index.ts packages/opencode/src/index.ts
+          git add -A
           git diff --cached --check
-          if git diff --cached --quiet; then
-            echo "Wiring is already materialized."
-            exit 0
-          fi
-          git commit -m "feat(local): register Ollama runtime and local CLI"
+          git commit -m "chore(local): remove bootstrap artifacts"
           git push origin HEAD:feature/local-foundation
