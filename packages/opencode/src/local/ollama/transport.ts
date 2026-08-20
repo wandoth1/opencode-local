@@ -1,11 +1,13 @@
 import { normalizeOllamaHost } from "./client"
 
+export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
 export interface OllamaNativeTransportOptions {
   host: string
   contexts: Record<string, number>
   keepAlive?: string
   enabled?: boolean
-  fetch?: typeof fetch
+  fetch?: FetchLike
 }
 
 type JsonRecord = Record<string, any>
@@ -349,9 +351,9 @@ function streamResponse(response: Response, request: JsonRecord) {
   })
 }
 
-export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): typeof fetch {
+export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): FetchLike {
   const host = normalizeOllamaHost(options.host)
-  const fetchFn = options.fetch ?? fetch
+  const fetchFn: FetchLike = options.fetch ?? fetch
   if (options.enabled === false) return fetchFn
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
