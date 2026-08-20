@@ -70,6 +70,21 @@ describe("Gemini route", () => {
           providerOptions: { safetySettings: [] },
         }),
       )
+      const cachedKey = yield* compileRequest(
+        LLMRequest.update(request, {
+          promptCacheKey: "cachedContents/from-key",
+        }),
+      )
+      const vertexCachedKey = yield* compileRequest(
+        LLMRequest.update(request, {
+          promptCacheKey: "projects/my-project/locations/us-central1/cachedContents/from-vertex-key",
+        }),
+      )
+      const genericCacheKey = yield* compileRequest(
+        LLMRequest.update(request, {
+          promptCacheKey: "session_12345",
+        }),
+      )
 
       expect(prepared.body.generationConfig?.thinkingConfig).toEqual({
         thinkingBudget: 0,
@@ -77,6 +92,11 @@ describe("Gemini route", () => {
         thinkingLevel: "high",
       })
       expect(prepared.body.cachedContent).toBe("cachedContents/example")
+      expect(cachedKey.body.cachedContent).toBe("cachedContents/from-key")
+      expect(vertexCachedKey.body.cachedContent).toBe(
+        "projects/my-project/locations/us-central1/cachedContents/from-vertex-key",
+      )
+      expect(genericCacheKey.body.cachedContent).toBeUndefined()
       expect(prepared.body.safetySettings).toEqual([
         { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
       ])
