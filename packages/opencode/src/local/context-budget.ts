@@ -111,8 +111,11 @@ function outputBudget(context: number) {
 export function recommendContext(input: ContextBudgetInput): ContextRecommendation {
   const modelMaxContextTokens = Math.max(MIN_CONTEXT, input.model.contextLength ?? DEFAULT_CONTEXT)
   const kvBytesPerToken = estimateKvBytesPerToken(input.model, input.kvCacheBytesPerElement ?? 2)
-  const estimatedModelVramBytes =
-    input.loadedSizeVramBytes ?? Math.ceil(input.model.fileSizeBytes * MODEL_SIZE_MULTIPLIER + MODEL_RUNTIME_OVERHEAD)
+  const fileBasedModelVram =
+    input.model.fileSizeBytes > 0
+      ? Math.ceil(input.model.fileSizeBytes * MODEL_SIZE_MULTIPLIER + MODEL_RUNTIME_OVERHEAD)
+      : undefined
+  const estimatedModelVramBytes = fileBasedModelVram ?? input.loadedSizeVramBytes ?? MODEL_RUNTIME_OVERHEAD
   const budget = gpuBudget(input.hardware)
   const reasons: string[] = []
 
@@ -126,19 +129,24 @@ export function recommendContext(input: ContextBudgetInput): ContextRecommendati
     reasons.push("No NVIDIA telemetry was available; using a conservative local default.")
   } else {
     const reserve = Math.max(MIN_GPU_RESERVE, Math.floor(budget.total * 0.08))
-    availableVramBytes = Math.max(0, budget.free - estimatedModelVramBytes - reserve)
-    expectedCpuOffload = estimatedModelVramBytes + reserve > budget.free
+    const reclaimableLoadedVram = input.loadedSizeVramBytes ?? 0
+    const effectiveFreeVram = budget.free + reclaimableLoadedVram
+    availableVramBytes = Math.max(0, effectiveFreeVram - estimatedModelVramBytes - reserve)
+    expectedCpuOffload = estimatedModelVramBytes + reserve > effectiveFreeVram
+    if (reclaimableLoadedVram > 0) {
+      reasons.push("The selected model is already loaded; its observed VRAM was added back before estimating a reload.")
+    }
     if (budget.count > 1) reasons.push("VRAM was aggregated across multiple GPUs; actual Ollama placement may differ.")
 
     if (expectedCpuOffload) {
       safeContext = MIN_CONTEXT
-      reasons.push("The model is unlikely to fit completely in currently free VRAM, so CPU offload is expected.")
+      reasons.push("The model is unlikely to fit completely in available VRAM, so CPU offload is expected.")
       confidence = "medium"
     } else if (kvBytesPerToken) {
       const rawTokens = Math.floor((availableVramBytes * KV_SAFETY_FACTOR) / kvBytesPerToken)
       safeContext = roundContextDown(clamp(rawTokens, MIN_CONTEXT, modelMaxContextTokens))
       estimatedKvVramBytes = safeContext * kvBytesPerToken
-      reasons.push("Context was limited by the estimated KV cache and currently free NVIDIA VRAM.")
+      reasons.push("Context was limited by the estimated KV cache and available NVIDIA VRAM.")
       confidence = budget.count === 1 ? "high" : "medium"
     } else {
       safeContext = Math.min(modelMaxContextTokens, DEFAULT_CONTEXT)
