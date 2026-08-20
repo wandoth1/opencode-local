@@ -73,6 +73,12 @@ function hinted(id: string, hints: string[]) {
   return hints.some((hint) => lower.includes(hint))
 }
 
+function reportedOrLegacyHint(model: OllamaDiscoveryModel, capabilities: string[], hints: string[]) {
+  if (capabilities.some((capability) => hasCapability(model, capability))) return true
+  if (model.metadata.capabilities.length > 0) return false
+  return hinted(model.metadata.id, hints)
+}
+
 function loadedModel(model: OllamaDiscoveryModel, running: OllamaRunningModel[] | undefined) {
   return running?.find((item) => (item.model || item.name) === model.metadata.id)
 }
@@ -87,15 +93,12 @@ export function buildOllamaModel(
     model: model.metadata,
     hardware: options.hardware,
     requestedContextTokens: options.requestedContextTokens,
+    loadedSizeVramBytes: running?.size_vram,
   })
 
-  const toolcall =
-    options.forceToolCall ?? (hasCapability(model, "tools") || hasCapability(model, "tool") || hinted(id, TOOL_HINTS))
-  const reasoning =
-    options.forceReasoning ??
-    (hasCapability(model, "thinking") || hasCapability(model, "reasoning") || hinted(id, REASONING_HINTS))
-  const vision =
-    options.forceVision ?? (hasCapability(model, "vision") || hasCapability(model, "image") || hinted(id, VISION_HINTS))
+  const toolcall = options.forceToolCall ?? reportedOrLegacyHint(model, ["tools", "tool"], TOOL_HINTS)
+  const reasoning = options.forceReasoning ?? reportedOrLegacyHint(model, ["thinking", "reasoning"], REASONING_HINTS)
+  const vision = options.forceVision ?? reportedOrLegacyHint(model, ["vision", "image"], VISION_HINTS)
   const nameDetails = [model.metadata.parameterSize, model.metadata.quantization].filter(Boolean).join(" · ")
   const name = nameDetails ? `${id} (${nameDetails})` : id
 
