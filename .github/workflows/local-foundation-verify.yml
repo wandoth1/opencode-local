@@ -37,6 +37,54 @@ jobs:
           rm -rf scripts/local-hardening scripts/local-foundation-update
           rm -f .github/workflows/local-hardening-apply.yml
 
+      - name: Apply compatibility fixes for the current OpenCode config service
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cli = Path("packages/opencode/src/cli/cmd/local.ts")
+          text = cli.read_text(encoding="utf-8")
+          text = text.replace('import { Config } from "@/config/config"\n', "")
+          old = '''    const configService = yield* Config.Service
+              const [config, globalConfig] = yield* Effect.all([configService.get(), configService.getGlobal()])'''
+          new = '''    const { Config } = yield* Effect.promise(() => import("../../config/config"))
+              const [config, globalConfig] = yield* Effect.all([
+                Config.Service.use((service) => service.get()),
+                Config.Service.use((service) => service.getGlobal()),
+              ])'''
+          if old not in text:
+              raise SystemExit("local.ts config-service anchor was not found")
+          cli.write_text(text.replace(old, new), encoding="utf-8")
+
+          plugin = Path("packages/opencode/src/plugin/index.ts")
+          text = plugin.read_text(encoding="utf-8")
+          old = "        const globalCfg = yield* config.getGlobal()"
+          new = "        const globalCfg = yield* Config.Service.use((service) => service.getGlobal())"
+          if old not in text:
+              raise SystemExit("plugin global-config anchor was not found")
+          plugin.write_text(text.replace(old, new), encoding="utf-8")
+
+          integration = Path("packages/opencode/src/local/ollama/integration.ts")
+          text = integration.read_text(encoding="utf-8")
+          old = '''function headers(value: unknown): Record<string, string> | undefined {
+              if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+              return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+            }'''
+          new = '''function headers(value: unknown): Record<string, string> | undefined {
+              if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+              const result: Record<string, string> = {}
+              for (const [key, entry] of Object.entries(value)) {
+                if (typeof entry === "string") result[key] = entry
+              }
+              return result
+            }'''
+          if old not in text:
+              raise SystemExit("integration headers anchor was not found")
+          integration.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
