@@ -107,7 +107,7 @@ function sensitiveKey(key: string) {
   )
 }
 
-export function redactSecrets<T>(value: T): T {
+export function redactSecrets(value: unknown): unknown {
   const seen = new WeakSet<object>()
 
   const visit = (current: unknown, key?: string): unknown => {
@@ -122,5 +122,5 @@ export function redactSecrets<T>(value: T): T {
     return Object.fromEntries(Object.entries(current).map(([entryKey, entry]) => [entryKey, visit(entry, entryKey)]))
   }
 
-  return visit(value) as T
+  return visit(value)
 }
