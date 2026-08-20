@@ -1,0 +1,248 @@
+diff --git a/docs/local-foundation/ARCHITECTURE.md b/docs/local-foundation/ARCHITECTURE.md
+index f288151..2fa7ce4 100644
+--- a/docs/local-foundation/ARCHITECTURE.md
++++ b/docs/local-foundation/ARCHITECTURE.md
+@@ -1,5 +1,92 @@
+-# Local foundation
++# Local-first foundation
+ 
+-This branch contains the local-first runtime work for OpenCode. The implementation is intentionally isolated from upstream provider behavior and will be developed behind explicit provider/runtime boundaries.
++This branch adds a local-runtime layer to OpenCode without replacing its mature UI, sessions, tools, MCP, skills, provider catalogue, or cloud backends.
+ 
+-Status: initial write-access verification.
++The design borrows the useful boundary from `vercel-labs/fx`—agent, provider, transport—while keeping the implementation independent and TypeScript-native. No FX source code is copied.
++
++## Runtime flow
++
++```text
++OpenCode agent / tools / sessions
++             |
++      provider configuration
++             |
++       Ollama integration
++       |               |
++ model discovery   native transport
++ /api/tags         /api/chat (NDJSON)
++ /api/show              |
++ /api/ps           OpenAI SSE adapter
++             \          /
++              context budget
++                    |
++          NVIDIA telemetry / VRAM
++                    |
++              local model
++```
++
++## Main components
++
++- `src/local/hardware.ts` reads conservative NVIDIA telemetry through `nvidia-smi`.
++- `src/local/context-budget.ts` estimates model residency and KV-cache bytes per token from GGUF metadata.
++- `src/local/ollama/client.ts` provides bounded native Ollama discovery, introspection, and benchmarking.
++- `src/local/ollama/model.ts` maps native model metadata into OpenCode provider configuration.
++- `src/local/ollama/transport.ts` translates OpenAI-compatible requests to `/api/chat` and converts Ollama NDJSON back to incremental OpenAI SSE. This preserves time-to-first-token and enables request-specific `num_ctx`.
++- `src/local/ollama/integration.ts` injects the provider at runtime only when Ollama is reachable or explicitly configured.
++- `src/plugin/ollama.ts` is the built-in plugin entry point.
++- `opencode local doctor` exposes diagnostics and an optional benchmark.
++
++## Safety and compatibility
++
++- `dev` remains untouched; all development is isolated on `feature/local-foundation`.
++- Existing providers and the default OpenCode request pipeline are unchanged.
++- Automatic detection defaults to loopback only. Remote hosts must be explicitly configured.
++- Native transport can be disabled with `OPENCODE_OLLAMA_NATIVE_TRANSPORT=0`.
++- Local integration can be disabled with `OPENCODE_LOCAL_DISABLE=1` or `disabled_providers: ["ollama"]`.
++- The transport sets `truncate: false`; OpenCode must compact context rather than silently losing system or tool history.
++- Context estimates are conservative recommendations, not claims that every backend build or quantization will use identical memory.
++
++## Context policy
++
++The recommendation takes the minimum of model capability and estimated hardware capacity:
++
++```text
++currently free VRAM
++- estimated quantized model residency
++- runtime overhead
++- safety reserve
++= KV-cache budget
++```
++
++When architecture metadata is available, KV bytes per token are estimated as:
++
++```text
++2 (K + V)
++* block count
++* KV head count
++* head dimension
++* cache bytes per element
++```
++
++The result is rounded down to a stable context step. The agent-history recommendation follows the conservative FX-style principle of reserving output capacity and assigning only a fraction of the remaining window to durable history.
++
++## Scope of this milestone
++
++Implemented:
++
++- automatic Ollama detection and model discovery;
++- model capabilities and metadata mapping;
++- request-specific native context control;
++- streaming native transport;
++- NVIDIA/VRAM diagnostics;
++- adaptive context recommendation;
++- short reproducible benchmark;
++- unit tests and documentation.
++
++Deferred deliberately:
++
++- direct `llama.cpp-server` backend;
++- AMD/Intel GPU telemetry;
++- automatic runtime selection between Ollama and llama.cpp;
++- UI panels beyond the CLI doctor command;
++- empirical tuning from the target RTX 5070, which requires running the doctor command on the actual machine.
+diff --git a/docs/local-foundation/AUDIT.md b/docs/local-foundation/AUDIT.md
+new file mode 100644
+index 0000000..03a7405
+--- /dev/null
++++ b/docs/local-foundation/AUDIT.md
+@@ -0,0 +1,34 @@
++# Independent audit notes
++
++## Baseline
++
++- Upstream repository: `anomalyco/opencode`
++- Upstream branch: `dev`
++- Baseline commit: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`
++- Working branch: `feature/local-foundation`
++
++## Audit priorities
++
++An independent reviewer should verify:
++
++1. OpenCode provider initialization still works when Ollama is absent.
++2. The built-in plugin mutates only the in-memory parsed configuration.
++3. Automatic network access is loopback-only unless the user explicitly supplies a host.
++4. Remote API keys are not printed, persisted by this implementation, or included in diagnostic JSON.
++5. OpenAI-to-Ollama message conversion preserves system, user, assistant, tool-call, and tool-result semantics.
++6. NDJSON-to-SSE conversion streams incrementally rather than buffering the full response.
++7. Tool-call argument encoding remains valid across fragmented and non-fragmented responses.
++8. Cancellation and abort signals propagate through the custom fetch.
++9. Context sizing cannot exceed the model-declared maximum except through an explicit user override.
++10. Static `provider.ollama.models` configuration still overrides auto-discovered entries.
++11. Existing providers, model transforms, tests, and CLI commands have no behavior change.
++12. The implementation contains no copied FX source and introduces no Apache-2.0 licensing obligation.
++
++## Known limitations to challenge
++
++- Older Ollama releases that return no capability list fall back to conservative model-name hints; explicit capability overrides should be tested for unusual custom models.
++- VRAM estimation assumes a conventional quantized model layout and a two-byte KV cache unless metadata says otherwise.
++- Multi-GPU memory is aggregated even though Ollama placement may not use every GPU equally.
++- The first milestone does not monitor VRAM continuously during a long agent session.
++- Native transport currently ignores OpenAI `tool_choice`; it preserves tools and lets Ollama/model selection decide.
++- Remote Ollama deployments behind unusual authentication proxies need explicit testing.
+diff --git a/docs/local-foundation/USAGE.md b/docs/local-foundation/USAGE.md
+new file mode 100644
+index 0000000..e239174
+--- /dev/null
++++ b/docs/local-foundation/USAGE.md
+@@ -0,0 +1,102 @@
++# Using the local runtime
++
++## Zero-configuration Ollama
++
++Start Ollama normally. OpenCode probes the loopback server and adds installed models under the `ollama` provider:
++
++```text
++ollama/<model-name>
++```
++
++No fake model catalogue entry or API key is required. The compatibility key `ollama` is supplied internally because Ollama ignores it.
++
++## Diagnostics
++
++```powershell
++opencode local doctor
++```
++
++Machine-readable output:
++
++```powershell
++opencode local doctor --json
++```
++
++Run a short benchmark against a selected model:
++
++```powershell
++opencode local doctor --model qwen3-coder:8b --benchmark
++```
++
++The benchmark reports time to first token, prompt processing speed, output speed, load duration, and the context used.
++
++## Useful environment variables
++
++```powershell
++$env:OPENCODE_OLLAMA_HOST = "http://127.0.0.1:11434"
++$env:OPENCODE_OLLAMA_NUM_CTX = "24576"
++$env:OPENCODE_OLLAMA_KEEP_ALIVE = "10m"
++```
++
++Disable the native request adapter and fall back to Ollama's `/v1` compatibility endpoint:
++
++```powershell
++$env:OPENCODE_OLLAMA_NATIVE_TRANSPORT = "0"
++```
++
++Disable automatic detection:
++
++```powershell
++$env:OPENCODE_OLLAMA_AUTODETECT = "0"
++```
++
++Disable all local-runtime integration:
++
++```powershell
++$env:OPENCODE_LOCAL_DISABLE = "1"
++```
++
++## Explicit configuration
++
++```jsonc
++{
++  "$schema": "https://opencode.ai/config.json",
++  "provider": {
++    "ollama": {
++      "options": {
++        "host": "http://127.0.0.1:11434",
++        "numCtx": 24576,
++        "keepAlive": "10m",
++        "nativeTransport": true,
++        "autoDiscover": true
++      }
++    }
++  }
++}
++```
++
++Advanced capability overrides are available for older Ollama versions that do not report model capabilities reliably:
++
++```jsonc
++{
++  "provider": {
++    "ollama": {
++      "options": {
++        "forceToolCall": true,
++        "forceReasoning": false,
++        "forceVision": false
++      }
++    }
++  }
++}
++```
++
++## First RTX 5070 validation
++
++Run:
++
++```powershell
++opencode local doctor --model <installed-model> --benchmark --json > opencode-local-doctor.json
++```
++
++The report contains no API credentials. Review it before sharing because GPU, CPU, driver, model names, and machine capacity are included.
