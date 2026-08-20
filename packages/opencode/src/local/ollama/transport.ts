@@ -60,22 +60,30 @@ function convertContent(content: unknown) {
   return { content: text.join("\n"), images }
 }
 
+function messageThinking(message: JsonRecord) {
+  return [message.thinking, message.reasoning, message.reasoning_content].find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  )
+}
+
 function convertMessages(messages: unknown): JsonRecord[] {
   if (!Array.isArray(messages)) return []
   return messages.flatMap((raw) => {
     const message = asObject(raw)
     if (!message || typeof message.role !== "string") return []
     const converted = convertContent(message.content)
+    const thinking = messageThinking(message)
     const result: JsonRecord = {
       role: message.role,
       content: converted.content,
+      ...(thinking && message.role === "assistant" ? { thinking } : {}),
       ...(converted.images.length ? { images: converted.images } : {}),
     }
 
     if (typeof message.tool_call_id === "string") result.tool_call_id = message.tool_call_id
     if (typeof message.name === "string") result.tool_name = message.name
     if (Array.isArray(message.tool_calls)) {
-      result.tool_calls = message.tool_calls.flatMap((rawCall: unknown, index: number) => {
+      const calls = message.tool_calls.flatMap((rawCall: unknown, index: number) => {
         const call = asObject(rawCall)
         const fn = asObject(call?.function)
         if (!fn || typeof fn.name !== "string") return []
@@ -83,12 +91,14 @@ function convertMessages(messages: unknown): JsonRecord[] {
           {
             id: typeof call?.id === "string" ? call.id : `call_${index}`,
             function: {
+              index,
               name: fn.name,
               arguments: parseArguments(fn.arguments),
             },
           },
         ]
       })
+      if (calls.length) result.tool_calls = calls
     }
     return [result]
   })
@@ -113,6 +123,11 @@ function convertResponseFormat(value: unknown): unknown {
   return undefined
 }
 
+function requestTools(body: JsonRecord) {
+  if (body.tool_choice === "none") return undefined
+  return Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : undefined
+}
+
 export function openAIToOllamaRequest(body: JsonRecord, contextTokens: number | undefined, keepAlive?: string) {
   const options: JsonRecord = {
     ...(contextTokens ? { num_ctx: contextTokens } : {}),
@@ -131,7 +146,7 @@ export function openAIToOllamaRequest(body: JsonRecord, contextTokens: number | 
     model: body.model,
     messages: convertMessages(body.messages),
     stream: body.stream !== false,
-    tools: Array.isArray(body.tools) ? body.tools : undefined,
+    tools: requestTools(body),
     format: convertResponseFormat(body.response_format),
     keep_alive: keepAlive,
     options,
@@ -244,12 +259,31 @@ function openAIError(status: number, body: string) {
   )
 }
 
-async function bodyText(init: RequestInit | undefined) {
+async function bodyText(input: RequestInfo | URL, init: RequestInit | undefined) {
   const body = init?.body
   if (typeof body === "string") return body
+  if (body instanceof URLSearchParams) return body.toString()
+  if (body instanceof Blob) return body.text()
   if (body instanceof Uint8Array) return new TextDecoder().decode(body)
   if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body))
+  if (input instanceof Request) {
+    try {
+      return await input.clone().text()
+    } catch {
+      return undefined
+    }
+  }
   return undefined
+}
+
+function requestHeaders(input: RequestInfo | URL, init: RequestInit | undefined) {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined)
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+  headers.delete("content-length")
+  headers.delete("host")
+  headers.set("Content-Type", "application/json")
+  headers.set("Accept", "application/x-ndjson")
+  return headers
 }
 
 function isChatCompletions(input: RequestInfo | URL) {
@@ -266,14 +300,19 @@ function streamResponse(response: Response, request: JsonRecord) {
   const id = `chatcmpl-${crypto.randomUUID()}`
   let roleSent = false
   let sawTools = false
+  let emittedTools = false
   let pending = ""
+  let cancelled = false
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const reader = response.body!.getReader()
-      const emit = (payload: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+    start(controller) {
+      reader = response.body!.getReader()
+      const emit = (payload: unknown) => {
+        if (!cancelled) controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+      }
       const processLine = (line: string) => {
         if (!line.trim()) return
         const chunk = JSON.parse(line) as JsonRecord
@@ -284,8 +323,9 @@ function streamResponse(response: Response, request: JsonRecord) {
           ...(!roleSent ? { role: "assistant" } : {}),
           ...(chunk.message?.content ? { content: String(chunk.message.content) } : {}),
           ...(chunk.message?.thinking ? { reasoning: String(chunk.message.thinking) } : {}),
-          ...(calls.length ? { tool_calls: calls } : {}),
+          ...(calls.length && !emittedTools ? { tool_calls: calls } : {}),
         }
+        if (calls.length) emittedTools = true
         if (Object.keys(delta).length) {
           roleSent = true
           emit(
@@ -313,30 +353,33 @@ function streamResponse(response: Response, request: JsonRecord) {
               },
             }),
           )
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+          if (!cancelled) controller.enqueue(encoder.encode("data: [DONE]\n\n"))
         }
       }
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          pending += decoder.decode(value, { stream: true })
-          const lines = pending.split("\n")
-          pending = lines.pop() ?? ""
-          for (const line of lines) processLine(line)
+      void (async () => {
+        try {
+          while (!cancelled) {
+            const { done, value } = await reader!.read()
+            if (done) break
+            pending += decoder.decode(value, { stream: true })
+            const lines = pending.split("\n")
+            pending = lines.pop() ?? ""
+            for (const line of lines) processLine(line)
+          }
+          pending += decoder.decode()
+          if (!cancelled && pending.trim()) processLine(pending)
+          if (!cancelled) controller.close()
+        } catch (error) {
+          if (!cancelled) controller.error(error)
+        } finally {
+          reader?.releaseLock()
         }
-        pending += decoder.decode()
-        if (pending.trim()) processLine(pending)
-        controller.close()
-      } catch (error) {
-        controller.error(error)
-      } finally {
-        reader.releaseLock()
-      }
+      })()
     },
-    cancel(reason) {
-      void response.body?.cancel(reason)
+    async cancel(reason) {
+      cancelled = true
+      await reader?.cancel(reason).catch(() => undefined)
     },
   })
 
@@ -358,7 +401,7 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!isChatCompletions(input)) return fetchFn(input, init)
-    const rawBody = await bodyText(init)
+    const rawBody = await bodyText(input, init)
     if (!rawBody) return fetchFn(input, init)
 
     let request: JsonRecord
@@ -369,14 +412,12 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
     }
 
     const native = openAIToOllamaRequest(request, options.contexts[String(request.model)], options.keepAlive)
-    const headers = new Headers(init?.headers)
-    headers.set("Content-Type", "application/json")
-    headers.set("Accept", "application/x-ndjson")
     const response = await fetchFn(`${host}/api/chat`, {
       ...init,
       method: "POST",
-      headers,
+      headers: requestHeaders(input, init),
       body: JSON.stringify(native),
+      signal: init?.signal ?? (input instanceof Request ? input.signal : undefined),
     })
 
     if (!response.ok) return openAIError(response.status, await response.text())
