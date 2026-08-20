@@ -3,7 +3,7 @@ import { Effect } from "effect"
 import { CacheHint, LLM, Message } from "../src/index.js"
 import { Auth } from "../src/route.js"
 import { compileRequest } from "../src/route/client.js"
-import { AmazonBedrock } from "../src/providers.js"
+import { AmazonBedrock, GoogleVertexMessages } from "../src/providers.js"
 import * as AnthropicMessages from "../src/protocols/anthropic-messages.js"
 import * as Gemini from "../src/protocols/gemini.js"
 import * as OpenAIChat from "../src/protocols/openai-chat.js"
@@ -28,6 +28,12 @@ const geminiModel = Gemini.route
     auth: Auth.header("x-goog-api-key", "test"),
   })
   .model({ id: "gemini-2.5-flash" })
+
+const vertexModel = GoogleVertexMessages.configure({
+  accessToken: "test",
+  location: "global",
+  project: "test",
+}).model("claude-opus-4-8")
 
 describe("applyCachePolicy", () => {
   it.effect("undefined cache resolves to 'auto' (the recommended default)", () =>
@@ -82,6 +88,23 @@ describe("applyCachePolicy", () => {
             content: [{ type: "text", text: "latest user message", cache_control: { type: "ephemeral" } }],
           },
         ],
+      })
+    }),
+  )
+
+  it.effect("'auto' marks cache boundaries on Google Vertex Messages", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        LLM.request({
+          model: vertexModel,
+          system: "You are concise.",
+          prompt: "hi",
+        }),
+      )
+
+      expect(prepared.body).toMatchObject({
+        system: [{ type: "text", text: "You are concise.", cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
       })
     }),
   )
