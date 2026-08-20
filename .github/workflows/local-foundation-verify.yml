@@ -14,10 +14,10 @@ on:
       - "packages/opencode/test/local/**"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  verify-and-wire:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -73,40 +73,20 @@ jobs:
           set -o pipefail
           bun test test/local --timeout 30000 --only-failures 2>&1 | tee ../../docs/local-foundation/ci-tests.log
 
-      - name: Commit failure diagnostics
-        if: steps.typecheck.outcome == 'failure' || steps.tests.outcome == 'failure'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/local-foundation/ci-typecheck.log
-          if [[ -f docs/local-foundation/ci-tests.log ]]; then
-            git add docs/local-foundation/ci-tests.log
-          fi
-          git commit -m "chore(local): capture CI diagnostics [skip ci]"
-          git push origin "HEAD:${TARGET_BRANCH}"
+      - name: Upload verification diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-foundation-diagnostics-${{ github.run_id }}
+          path: |
+            docs/local-foundation/ci-typecheck.log
+            docs/local-foundation/ci-tests.log
+          if-no-files-found: ignore
+          retention-days: 3
 
-      - name: Commit verified wiring and formatting
+      - name: Verify generated wiring and formatting are clean
         if: steps.typecheck.outcome == 'success' && steps.tests.outcome == 'success'
-        shell: bash
-        run: |
-          rm -f docs/local-foundation/ci-typecheck.log docs/local-foundation/ci-tests.log
-          if git diff --quiet; then
-            echo "No generated changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            packages/opencode/src/local \
-            packages/opencode/src/plugin/ollama.ts \
-            packages/opencode/src/cli/cmd/local.ts \
-            packages/opencode/src/plugin/index.ts \
-            packages/opencode/src/index.ts \
-            packages/opencode/test/local \
-            docs/local-foundation
-          git commit -m "chore(local): wire and format verified foundation [skip ci]"
-          git push origin "HEAD:${TARGET_BRANCH}"
+        run: git diff --check
 
       - name: Fail verification when checks failed
         if: steps.typecheck.outcome == 'failure' || steps.tests.outcome == 'failure'
