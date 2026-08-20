@@ -5,8 +5,10 @@ import {
   type FetchLike,
 } from "@/local/ollama/transport"
 
+type ReaderResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>
+
 function readWithTimeout(reader: ReadableStreamDefaultReader<Uint8Array>, timeoutMs = 2_000) {
-  return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+  return new Promise<ReaderResult>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("stream read timed out")), timeoutMs)
     reader.read().then(
       (result) => {
