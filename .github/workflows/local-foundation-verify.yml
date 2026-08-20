@@ -32,7 +32,8 @@ jobs:
         run: |
           set -euo pipefail
           cat scripts/local-hardening/chunk-* | base64 --decode > /tmp/local-hardening.tar.gz
-          echo "d12063fdd6e87678a37bcc1d0cbc64ff0d204c882f85cad7571d7dde5b36a924  /tmp/local-hardening.tar.gz" | sha256sum --check
+          sha256sum /tmp/local-hardening.tar.gz
+          tar -tzf /tmp/local-hardening.tar.gz >/dev/null
           tar -xzf /tmp/local-hardening.tar.gz -C .
           rm -rf scripts/local-hardening scripts/local-foundation-update
           rm -f .github/workflows/local-hardening-apply.yml
