@@ -6,6 +6,20 @@
 - Upstream branch: `dev`
 - Baseline commit: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`
 - Working branch: `feature/local-foundation`
+- Review surface: draft pull request `#1`
+
+## Reproducible verification
+
+From the repository root:
+
+```bash
+bun install --frozen-lockfile
+cd packages/opencode
+bun run typecheck
+bun test test/local --timeout 30000 --only-failures
+```
+
+The pull-request workflow runs the same locked install, formatting check, package typecheck, and focused test suite directly against the committed implementation. No generated wiring or bootstrap step is required.
 
 ## Audit priorities
 
@@ -26,7 +40,7 @@ An independent reviewer should verify:
 
 ## Known limitations to challenge
 
-- Capability-name and model-name heuristics may overstate tool support on unusual custom models.
+- Older Ollama releases that return no capability list fall back to conservative model-name hints; unusual custom models may still need explicit capability overrides.
 - VRAM estimation assumes a conventional quantized model layout and a two-byte KV cache unless metadata says otherwise.
 - Multi-GPU memory is aggregated even though Ollama placement may not use every GPU equally.
 - The first milestone does not monitor VRAM continuously during a long agent session.
