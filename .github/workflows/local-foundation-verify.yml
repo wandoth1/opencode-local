@@ -70,16 +70,48 @@ jobs:
             docs/local-foundation
 
       - name: Typecheck OpenCode
+        id: typecheck
+        shell: bash
         working-directory: packages/opencode
-        run: bun run typecheck
+        run: |
+          set +e
+          set -o pipefail
+          bun run typecheck 2>&1 | tee ../../docs/local-foundation/ci-typecheck.log
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Run local foundation tests
+        id: tests
+        if: steps.typecheck.outputs.status == '0'
+        shell: bash
         working-directory: packages/opencode
-        run: bun test test/local --timeout 30000 --only-failures
+        run: |
+          set +e
+          set -o pipefail
+          bun test test/local --timeout 30000 --only-failures 2>&1 | tee ../../docs/local-foundation/ci-tests.log
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Commit verified wiring and formatting
+      - name: Commit failure diagnostics
+        if: steps.typecheck.outputs.status != '0' || (steps.tests.outcome != 'skipped' && steps.tests.outputs.status != '0')
         shell: bash
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/local-foundation/ci-typecheck.log
+          if [[ -f docs/local-foundation/ci-tests.log ]]; then
+            git add docs/local-foundation/ci-tests.log
+          fi
+          git commit -m "chore(local): capture CI diagnostics [skip ci]"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Commit verified wiring and formatting
+        if: steps.typecheck.outputs.status == '0' && steps.tests.outputs.status == '0'
+        shell: bash
+        run: |
+          rm -f docs/local-foundation/ci-typecheck.log docs/local-foundation/ci-tests.log
           if git diff --quiet; then
             echo "No generated changes to commit."
             exit 0
@@ -96,3 +128,11 @@ jobs:
             docs/local-foundation
           git commit -m "chore(local): wire and format verified foundation [skip ci]"
           git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Fail verification when checks failed
+        if: steps.typecheck.outputs.status != '0' || (steps.tests.outcome != 'skipped' && steps.tests.outputs.status != '0')
+        shell: bash
+        run: |
+          echo "Typecheck status: ${{ steps.typecheck.outputs.status }}"
+          echo "Test status: ${{ steps.tests.outputs.status }}"
+          exit 1
