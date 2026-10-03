@@ -29,7 +29,7 @@ test("estimates grouped-query KV cache bytes per token", () => {
 })
 test("retains agent context and warns when the advisory 12 GiB budget is exceeded", () => {
   const recommendation = recommendContext({ model, hardware: hardware(11.5) })
-  expect(recommendation.recommendedContextTokens).toBe(16384)
+  expect(recommendation.recommendedContextTokens).toBe(32768)
   expect(recommendation.recommendedContextTokens).toBeLessThan(model.contextLength!)
   expect(recommendation.expectedCpuOffload).toBe(true)
   expect(recommendation.confidence).toBe("medium")
@@ -37,14 +37,14 @@ test("retains agent context and warns when the advisory 12 GiB budget is exceede
 test("does not subtract an already-loaded model twice from free VRAM", () => {
   const recommendation = recommendContext({ model, hardware: hardware(2.5), loadedSizeVramBytes: 9 * GIB })
   const unloaded = recommendContext({ model, hardware: hardware(11.5) })
-  expect(recommendation.recommendedContextTokens).toBe(16384)
+  expect(recommendation.recommendedContextTokens).toBe(32768)
   expect(recommendation.availableVramBytes).toBe(unloaded.availableVramBytes)
   expect(recommendation.expectedCpuOffload).toBe(unloaded.expectedCpuOffload)
   expect(recommendation.reasons.some((reason) => reason.includes("already loaded"))).toBe(true)
 })
 test("flags expected offload without silently making the agent context unusable", () => {
   const recommendation = recommendContext({ model, hardware: hardware(7) })
-  expect(recommendation.recommendedContextTokens).toBe(16384)
+  expect(recommendation.recommendedContextTokens).toBe(32768)
   expect(recommendation.expectedCpuOffload).toBe(true)
 })
 test("honors an explicit context override but records the risk", () => {
