@@ -10,7 +10,7 @@ The failed archive-based attempts are historical failures, not implemented fixes
 
 Read [REAUDIT_FIXES.md](REAUDIT_FIXES.md) for the second audit's B1, H1-H3, M1-M8 and lower-priority findings. Review the implementation, not just that table. Important acceptance boundaries:
 
-- The default agent context is 16K capped at the native model maximum, not a transient-VRAM-driven 4K allocation. Explicit small windows remain small and may be unusable. This is not tokenizer-based admission control.
+- The default agent context is 32K capped at the native model maximum, not a transient-VRAM-driven 4K allocation. Explicit small windows remain small and may be unusable. This is not tokenizer-based admission control.
 - Error bodies are bounded and classified into canonical messages. Test the real AI SDK error and `ProviderError.parseAPICallError`, not merely the regular expression, to establish context-overflow propagation.
 - There is no hidden 300-second total generation timeout. Explicit timeouts remain distinguishable from user cancellation. The long-stream test uses a real loopback HTTP stream for 305 seconds.
 - Disabling Ollama removes and blacklists its raw provider. The supported source launcher is Node, which starts Bun without project `.env` loading and with an explicit trusted preload/configuration. Direct Bun source execution is not the safe entrypoint.
@@ -52,7 +52,7 @@ Before merge: independent adversarial review, green revised-commit checks, and a
 
 ## Deliberate limits
 
-A 16K default is not enough for every prompt/toolset/history. Modelfile or explicit allocations can still exceed available memory or be too small for the agent. Unknown architectures stay unknown; /api/ps measurements are not converted into a universal KV model. The client environment does not prove the daemon's cache settings. Prefill throughput is unknown when cache counters are missing.
+A 32K default is not enough for every prompt/toolset/history. Modelfile or explicit allocations can still exceed available memory or be too small for the agent. Unknown architectures stay unknown; /api/ps measurements are not converted into a universal KV model. The client environment does not prove the daemon's cache settings. Prefill throughput is unknown when cache counters are missing.
 
 Native `truncate:false`/`shift:false` behavior is version dependent. The 16 MiB request and 2 MiB frame bounds are intentional; external images are not fetched. Forced tool choice is rejected. Tool IDs are not names; premature EOF never becomes a successful stop. There is no general sandbox for project tools, plugins or other inherited providers.
 

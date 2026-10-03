@@ -40,3 +40,16 @@ Before merge, repeat real E5 with the supported Node launcher and no context ove
 32K is a practical default, not a tokenizer-based admission guarantee for arbitrary tools/plugins/history. Deliberately configured smaller windows can still be unusable and large allocations can offload/fail. KV is not calibrated against actual /api/ps deltas; unknown architectures remain unknown. Client environment variables do not prove daemon settings. No multi-GPU placement optimizer, llama.cpp backend, continuous VRAM manager, fresh physical benchmark, packaged binary or speedup claim is delivered.
 
 The agent is not a sandbox. External plugins and other inherited provider configuration can execute or send data with user privileges. A plugin cannot sanitize environment variables already loaded by an unsafe parent; use the Node launcher from a trusted checkout with trusted executable/configuration.
+
+## Third re-audit follow-up
+
+The third physical re-audit examined `b5f54f7aa2bdf165efb04c3106a560d5dd995abb` and accepted it with minor changes: the default-context turn completed with the owner's real profile and the overflow guard stopped after the second consecutive overflow. It asked for the items below. They are implemented by the auditor, so this follow-up has not been independently reviewed.
+
+| Finding | Change |
+| --- | --- |
+| Guard only unit-tested | Two launcher-level tests in `reaudit-cli.test.ts` drive the real session loop against a daemon fixture: persistent overflow must stop after exactly two agent turns and one compaction with the actionable error; overflow, successful tool turn, overflow, answer must reach the fourth agent turn. Each fails when the guard or its reset is removed from `src/session/prompt.ts`. They add roughly 20 seconds to the local suite. |
+| `AUDIT.md` still said 16K | Corrected to 32K. |
+| `OLLAMA_HOST=:11434/v1` rejected | Empty-host bind notation is accepted with a path. |
+| Explicit deadline retried five times | The expired-deadline message no longer matches the core's retryable-message patterns, so a configured `generationTimeoutMs` fails once instead of repeating the whole generation with backoff. The error is still a `TimeoutError`. |
+
+Not changed: unclassified daemon errors still surface as a bare HTTP status; `run` reports an unknown server error when an `ollama/` model is requested while the provider is disabled and exits non-zero after a recovered overflow (both upstream behaviour for any provider); the context default remains a constant rather than a measurement of the actual prompt.
