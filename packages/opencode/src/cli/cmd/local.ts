@@ -1,181 +1,52 @@
 import type { Argv } from "yargs"
 import { Effect } from "effect"
-import { effectCmd, fail } from "../effect-cmd"
-import { formatBytes, redactSecrets } from "@/local/runtime"
-import { contextRiskLabel } from "@/local/context-budget"
-import { OllamaClient } from "@/local/ollama/client"
-import { OllamaIntegration } from "@/local/ollama/integration"
-
-interface DoctorArgs {
-  host?: string
-  model?: string
-  numCtx?: number
-  json?: boolean
-  benchmark?: boolean
-  outputTokens?: number
-}
-
-function number(value: number | undefined, digits = 1) {
-  return value === undefined || !Number.isFinite(value) ? "unknown" : value.toFixed(digits)
-}
-
-function printDoctor(snapshot: NonNullable<Awaited<ReturnType<typeof OllamaIntegration.discover>>>, modelID?: string) {
-  console.log("Local runtime")
-  console.log(`  Backend:           Ollama ${snapshot.version ?? "unknown version"}`)
-  console.log(`  Endpoint:          ${snapshot.settings.host}`)
-  console.log(`  Native transport: ${snapshot.settings.nativeTransport ? "enabled" : "disabled"}`)
-  console.log("")
-
-  console.log("Hardware")
-  console.log(`  Platform:          ${snapshot.hardware.platform}/${snapshot.hardware.architecture}`)
-  console.log(`  CPU:               ${snapshot.hardware.cpuModel} (${snapshot.hardware.cpuCount} logical cores)`)
-  console.log(
-    `  RAM:               ${formatBytes(snapshot.hardware.systemMemoryFreeBytes)} free / ${formatBytes(snapshot.hardware.systemMemoryTotalBytes)} total`,
-  )
-  if (snapshot.hardware.nvidiaGpus.length === 0) {
-    console.log("  NVIDIA:            not detected")
-  } else {
-    for (const gpu of snapshot.hardware.nvidiaGpus) {
-      console.log(`  GPU ${gpu.index}:             ${gpu.name}`)
-      console.log(
-        `    VRAM:            ${formatBytes(gpu.memoryFreeBytes)} free / ${formatBytes(gpu.memoryTotalBytes)} total`,
-      )
-      console.log(`    Driver/CUDA:     ${gpu.driverVersion ?? "unknown"} / ${gpu.cudaVersion ?? "unknown"}`)
-      console.log(`    Utilization:     ${gpu.utilizationPercent ?? "unknown"}%`)
-    }
-  }
-  console.log("")
-
-  console.log("Models")
-  const entries = Object.entries(snapshot.models)
-  for (const [id, model] of entries) {
-    const profile = snapshot.profiles[id]
-    const selected = modelID === id ? "*" : " "
-    if (!profile) {
-      console.log(`${selected} ${id}: configured manually (${model.limit?.context ?? "unknown"} context)`)
-      continue
-    }
-    const loaded = profile.loaded?.sizeVramBytes ? ` · loaded ${formatBytes(profile.loaded.sizeVramBytes)}` : ""
-    console.log(
-      `${selected} ${id}: ${profile.metadata.parameterSize ?? "?"} ${profile.metadata.quantization ?? ""} · context ${profile.context.recommendedContextTokens} · ${contextRiskLabel(profile.context)}${loaded}`,
-    )
-    if (profile.context.expectedCpuOffload) console.log("    warning: CPU offload is expected with current VRAM capacity")
-  }
-}
-
+import { effectCmd, CliError } from "../effect-cmd"
+import { Config } from "../../config/config"
+import { formatBytes } from "../../local/runtime"
+import { getDoctorReport, type DoctorArgs } from "../../local/doctor"
+const printable = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+const metric = (value?: number) => value !== undefined && Number.isFinite(value) ? value.toFixed(1) : "unknown"
 const DoctorCommand = effectCmd({
   command: "doctor",
-  describe: "diagnose local Ollama, GPU, VRAM, models, and context sizing",
-  instance: false,
-  builder: (yargs: Argv) =>
-    yargs
-      .option("host", {
-        type: "string",
-        describe: "Ollama host (defaults to OPENCODE_OLLAMA_HOST, OLLAMA_HOST, or localhost)",
-      })
-      .option("model", {
-        type: "string",
-        describe: "model to highlight or benchmark",
-      })
-      .option("num-ctx", {
-        type: "number",
-        describe: "override context tokens for the recommendation and benchmark",
-      })
-      .option("benchmark", {
-        type: "boolean",
-        default: false,
-        describe: "run a short generation benchmark (loads the selected model)",
-      })
-      .option("output-tokens", {
-        type: "number",
-        default: 96,
-        describe: "maximum output tokens used by --benchmark",
-      })
-      .option("json", {
-        type: "boolean",
-        default: false,
-        describe: "emit machine-readable JSON",
-      }),
+  describe: "diagnose the configured Ollama runtime, GPU and context budget",
+  instance: true,
+  builder: (yargs: Argv) => yargs
+    .option("host", { type: "string", describe: "explicit Ollama endpoint override (does not inherit credentials for another endpoint)" })
+    .option("model", { type: "string", describe: "model to inspect or benchmark" })
+    .option("num-ctx", { type: "number", describe: "requested context, capped at the known model maximum" })
+    .option("benchmark", { type: "boolean", default: false, describe: "load the model and measure a short generation" })
+    .option("output-tokens", { type: "number", default: 96, describe: "maximum benchmark output tokens" })
+    .option("json", { type: "boolean", default: false, describe: "print allowlisted, credential-free diagnostic JSON" }),
   handler: Effect.fn("Cli.local.doctor")(function* (args: DoctorArgs) {
-    if (args.numCtx !== undefined && (!Number.isInteger(args.numCtx) || args.numCtx <= 0)) {
-      return yield* fail("--num-ctx must be a positive integer")
+    const service = yield* Config.Service
+    const config = yield* service.get()
+    const globalConfig = yield* service.getGlobal()
+    const report = yield* Effect.tryPromise({
+      try: () => getDoctorReport(config, globalConfig, args),
+      catch: () => new CliError({ message: "Local diagnosis failed. Check the model, numeric options, trusted Ollama endpoint and daemon availability.", exitCode: 1 }),
+    })
+    if (args.json) { console.log(JSON.stringify(report, null, 2)); return }
+    const snapshot = report.snapshot
+    console.log(`Ollama ${snapshot.version ?? "(version unknown)"} at ${printable(snapshot.endpoint)}`)
+    console.log(`Native transport: ${snapshot.nativeTransport ? "enabled" : "disabled"}`)
+    console.log(`Hardware: ${snapshot.hardware.platform}/${snapshot.hardware.architecture}`)
+    if (!snapshot.hardware.nvidiaGpus.length) console.log("NVIDIA telemetry unavailable; remote endpoints are not sized using this computer's GPU.")
+    for (const gpu of snapshot.hardware.nvidiaGpus) {
+      console.log(`GPU ${gpu.index}: ${printable(gpu.name)} | free ${formatBytes(gpu.memoryFreeBytes)} / ${formatBytes(gpu.memoryTotalBytes)}`)
+      console.log(`Driver ${gpu.driverVersion ?? "unknown"}; driver CUDA compatibility ${gpu.cudaVersion ?? "unknown"}`)
     }
-    if (args.outputTokens !== undefined && (!Number.isInteger(args.outputTokens) || args.outputTokens <= 0)) {
-      return yield* fail("--output-tokens must be a positive integer")
+    for (const [id, model] of Object.entries(snapshot.models)) {
+      console.log(`${id === report.selectedModel ? "*" : " "} ${printable(id)} | context ${model.limit.context} | tools ${model.tools}`)
+      if (model.context) for (const reason of model.context.reasons) console.log(`  ${reason}`)
     }
-
-    const config = {
-      provider: {
-        ollama: {
-          options: {
-            ...(args.host ? { host: args.host } : {}),
-            ...(args.numCtx ? { numCtx: args.numCtx } : {}),
-          },
-        },
-      },
-    } as any
-    const settings = OllamaIntegration.resolveSettings(config)
-    const snapshot = yield* Effect.promise(() => OllamaIntegration.discover(config, settings))
-    if (!snapshot) return yield* fail(`Ollama was not reachable at ${settings.host}, or it has no local models.`)
-
-    const modelID = args.model ?? Object.keys(snapshot.models)[0]
-    let benchmark
-    if (args.benchmark) {
-      if (!modelID || !snapshot.models[modelID]) return yield* fail(`Model not found: ${args.model ?? "(none)"}`)
-      const context =
-        args.numCtx ??
-        snapshot.profiles[modelID]?.context.recommendedContextTokens ??
-        snapshot.models[modelID].limit?.context ??
-        16_384
-      const client = new OllamaClient({
-        host: snapshot.settings.host,
-        apiKey: snapshot.settings.apiKey,
-        headers: snapshot.settings.headers,
-        timeoutMs: snapshot.settings.timeoutMs,
-      })
-      benchmark = yield* Effect.promise(() =>
-        client.benchmark({
-          model: modelID,
-          contextTokens: context,
-          outputTokens: args.outputTokens,
-          keepAlive: snapshot.settings.keepAlive,
-        }),
-      )
+    if (report.benchmark) {
+      console.log(`TTFT ${metric(report.benchmark.timeToFirstTokenMs)} ms | prompt ${metric(report.benchmark.promptTokensPerSecond)} tok/s | generation ${metric(report.benchmark.outputTokensPerSecond)} tok/s`)
+      console.log(`Wall ${metric(report.benchmark.wallDurationMs)} ms | model load ${metric(report.benchmark.loadDurationMs)} ms`)
     }
-
-    if (args.json) {
-      console.log(
-        JSON.stringify(
-          redactSecrets({
-            generatedAt: new Date().toISOString(),
-            snapshot,
-            benchmark,
-          }),
-          null,
-          2,
-        ),
-      )
-      return
-    }
-
-    printDoctor(snapshot, modelID)
-    if (!benchmark) return
-    console.log("")
-    console.log("Benchmark")
-    console.log(`  Model/context:     ${benchmark.model} / ${benchmark.contextTokens}`)
-    console.log(`  Time to first:     ${number(benchmark.timeToFirstTokenMs)} ms`)
-    console.log(`  Prompt speed:      ${number(benchmark.promptTokensPerSecond)} tok/s`)
-    console.log(`  Generation speed:  ${number(benchmark.outputTokensPerSecond)} tok/s`)
-    console.log(`  Wall duration:     ${number(benchmark.wallDurationMs)} ms`)
-    console.log(`  Load duration:     ${number(benchmark.loadDurationMs)} ms`)
-    if (benchmark.sample) console.log(`  Sample:            ${benchmark.sample.replace(/\s+/g, " ").trim()}`)
   }),
 })
-
 export const LocalCommand = effectCmd({
-  command: "local",
-  describe: "local model runtime tools",
-  instance: false,
+  command: "local", describe: "OpenCode Local runtime tools", instance: false,
   builder: (yargs: Argv) => yargs.command(DoctorCommand).demandCommand(),
   handler: Effect.fn("Cli.local")(function* () {}),
 })

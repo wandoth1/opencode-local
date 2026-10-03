@@ -1,320 +1,147 @@
-import type { LocalModelMetadata } from "../runtime"
+import { finitePositive, type LocalModelMetadata } from "../runtime"
 import { extractContextLength } from "../context-budget"
-
-export interface OllamaModelDetails {
-  parent_model?: string
-  format?: string
-  family?: string
-  families?: string[]
-  parameter_size?: string
-  quantization_level?: string
-}
-
-export interface OllamaTagModel {
-  name: string
-  model?: string
-  modified_at?: string
-  size?: number
-  digest?: string
-  details?: OllamaModelDetails
-}
-
-export interface OllamaTagsResponse {
-  models?: OllamaTagModel[]
-}
-
-export interface OllamaShowResponse {
-  modelfile?: string
-  parameters?: string
-  template?: string
-  system?: string
-  details?: OllamaModelDetails
-  model_info?: Record<string, unknown>
-  capabilities?: string[]
-}
-
-export interface OllamaRunningModel extends OllamaTagModel {
-  expires_at?: string
-  size_vram?: number
-  context_length?: number
-}
-
-export interface OllamaPsResponse {
-  models?: OllamaRunningModel[]
-}
-
-export interface OllamaVersionResponse {
-  version?: string
-}
-
-export interface OllamaDiscoveryModel {
-  tag: OllamaTagModel
-  show?: OllamaShowResponse
-  metadata: LocalModelMetadata
-}
-
+import { boundedText, checkAbort, jsonObject, object, readNdjson } from "./io"
+export interface OllamaModelDetails { parent_model?: string; format?: string; family?: string; families?: string[]; parameter_size?: string; quantization_level?: string }
+export interface OllamaTagModel { name: string; model?: string; modified_at?: string; size?: number; digest?: string; details?: OllamaModelDetails }
+export interface OllamaTagsResponse { models?: OllamaTagModel[] }
+export interface OllamaShowResponse { modelfile?: string; parameters?: string; template?: string; system?: string; details?: OllamaModelDetails; model_info?: Record<string, unknown>; capabilities?: string[] }
+export interface OllamaRunningModel extends OllamaTagModel { expires_at?: string; size_vram?: number; context_length?: number }
+export interface OllamaPsResponse { models?: OllamaRunningModel[] }
+export interface OllamaVersionResponse { version?: string }
+export interface OllamaDiscoveryModel { tag: OllamaTagModel; show?: OllamaShowResponse; metadata: LocalModelMetadata }
 export interface OllamaClientOptions {
-  host?: string
-  apiKey?: string
-  headers?: Record<string, string>
-  timeoutMs?: number
-  fetch?: typeof fetch
+  host?: string; apiKey?: string; headers?: Record<string, string>; timeoutMs?: number
+  fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 }
-
 export interface OllamaBenchmarkResult {
-  model: string
-  contextTokens: number
-  wallDurationMs: number
-  timeToFirstTokenMs?: number
-  promptTokens?: number
-  promptTokensPerSecond?: number
-  outputTokens?: number
-  outputTokensPerSecond?: number
-  loadDurationMs?: number
-  totalDurationMs?: number
-  sample: string
+  model: string; contextTokens: number; wallDurationMs: number; timeToFirstTokenMs?: number
+  promptTokens?: number; promptTokensPerSecond?: number; outputTokens?: number; outputTokensPerSecond?: number
+  loadDurationMs?: number; totalDurationMs?: number; sample: string
 }
-
-function withScheme(raw: string) {
-  return /^[a-z][a-z\d+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`
-}
-
 export function normalizeOllamaHost(raw?: string): string {
-  const source = (raw || "http://127.0.0.1:11434").trim()
-  const url = new URL(withScheme(source))
+  const source = (raw ?? "http://127.0.0.1:11434").trim()
+  let url: URL
+  try { url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(source) ? source : `http://${source}`) }
+  catch { throw new Error("Invalid Ollama endpoint") }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Ollama endpoints require HTTP(S) without embedded credentials, query or fragment")
+  }
   url.pathname = url.pathname.replace(/\/(?:v1|api)\/?$/i, "").replace(/\/+$/, "") || "/"
-  url.search = ""
-  url.hash = ""
   return url.toString().replace(/\/$/, "")
 }
-
-export function ollamaOpenAIBaseURL(host: string) {
-  return `${normalizeOllamaHost(host)}/v1`
-}
-
+export function ollamaOpenAIBaseURL(host: string) { return `${normalizeOllamaHost(host)}/v1` }
 export function isLoopbackOllamaHost(host: string) {
-  const hostname = new URL(normalizeOllamaHost(host)).hostname.replace(/^\[|\]$/g, "").toLowerCase()
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
+  const name = new URL(normalizeOllamaHost(host)).hostname.toLowerCase()
+  return name === "localhost" || name === "127.0.0.1" || name === "[::1]"
 }
-
-function abortSignal(timeoutMs: number, parent?: AbortSignal | null) {
-  const timeout = AbortSignal.timeout(timeoutMs)
-  if (!parent) return timeout
-  return AbortSignal.any([parent, timeout])
+export function ollamaHeaders(options: Pick<OllamaClientOptions, "apiKey" | "headers">) {
+  const headers = new Headers(options.headers)
+  for (const key of ["host", "content-length", "connection", "proxy-authorization", "cookie"]) headers.delete(key)
+  if (options.apiKey) headers.set("Authorization", `Bearer ${options.apiKey}`)
+  headers.set("Accept", "application/json")
+  return headers
 }
-
-function authHeaders(options: OllamaClientOptions): Record<string, string> {
-  return {
-    Accept: "application/json",
-    ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
-    ...options.headers,
-  }
+function signalWithTimeout(timeoutMs: number, parent?: AbortSignal) {
+  return parent ? AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
 }
-
-async function jsonOrError<T>(response: Response): Promise<T> {
-  if (response.ok) return (await response.json()) as T
-  const body = await response.text().catch(() => "")
-  throw new Error(`Ollama request failed (${response.status}): ${body.slice(0, 500) || response.statusText}`)
+function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [] }
+function text(value: unknown) { return typeof value === "string" ? value : undefined }
+function rate(count: unknown, ns: unknown) {
+  const n = finitePositive(count), duration = finitePositive(ns)
+  return n && duration ? n * 1e9 / duration : undefined
 }
-
-function positiveNumber(value: unknown): number | undefined {
-  const number = Number(value)
-  return Number.isFinite(number) && number > 0 ? number : undefined
-}
-
-function durationRate(count: unknown, durationNanoseconds: unknown) {
-  const tokens = positiveNumber(count)
-  const duration = positiveNumber(durationNanoseconds)
-  if (!tokens || !duration) return undefined
-  return tokens / (duration / 1_000_000_000)
-}
-
 export class OllamaClient {
   readonly host: string
   readonly openAIBaseURL: string
-  private readonly options: Required<Pick<OllamaClientOptions, "timeoutMs" | "fetch">> & OllamaClientOptions
-
-  constructor(options: OllamaClientOptions = {}) {
+  private readonly fetcher: NonNullable<OllamaClientOptions["fetch"]>
+  private readonly timeout: number
+  constructor(private readonly options: OllamaClientOptions = {}) {
     this.host = normalizeOllamaHost(options.host)
     this.openAIBaseURL = ollamaOpenAIBaseURL(this.host)
-    this.options = {
-      ...options,
-      timeoutMs: options.timeoutMs ?? 1_500,
-      fetch: options.fetch ?? fetch,
-    }
+    this.fetcher = options.fetch ?? fetch
+    this.timeout = Math.min(30000, Math.max(100, Math.floor(finitePositive(options.timeoutMs) ?? 1500)))
   }
-
-  private async request<T>(path: string, init: RequestInit = {}, timeoutMs = this.options.timeoutMs): Promise<T> {
-    const headers = new Headers(authHeaders(this.options))
-    new Headers(init.headers).forEach((value, key) => headers.set(key, value))
-    const response = await this.options.fetch(`${this.host}${path}`, {
-      ...init,
-      headers,
-      signal: abortSignal(timeoutMs, init.signal),
-    })
-    return jsonOrError<T>(response)
+  private async request(path: string, body?: unknown, parent?: AbortSignal) {
+    const signal = signalWithTimeout(this.timeout, parent)
+    const headers = ollamaHeaders(this.options)
+    if (body !== undefined) headers.set("Content-Type", "application/json")
+    let response: Response
+    try { response = await this.fetcher(`${this.host}${path}`, { method: body === undefined ? "GET" : "POST",
+      headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: "error", signal }) }
+    catch { checkAbort(signal); throw new Error("Ollama connection failed (redirects are not allowed)") }
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Ollama request failed (HTTP ${response.status})`) }
+    return jsonObject(await boundedText(response.body, signal))
   }
-
-  async version(): Promise<string | undefined> {
-    const response = await this.request<OllamaVersionResponse>("/api/version")
-    return response.version
-  }
-
-  async available(): Promise<boolean> {
-    try {
-      await this.version()
-      return true
-    } catch {
-      return false
-    }
-  }
-
+  async version(): Promise<string | undefined> { return text((await this.request("/api/version")).version) }
+  async available() { try { return Boolean(await this.version()) } catch { return false } }
   async tags(): Promise<OllamaTagModel[]> {
-    const response = await this.request<OllamaTagsResponse>("/api/tags")
-    return Array.isArray(response.models) ? response.models : []
+    const raw = await this.request("/api/tags")
+    if (!Array.isArray(raw.models)) throw new Error("Invalid Ollama model list")
+    if (raw.models.length > 256) throw new Error("Ollama discovery supports at most 256 models; configure a selection manually")
+    return raw.models.map((value: unknown) => {
+      const tag = object(value)
+      if (!tag || typeof tag.name !== "string" || !tag.name || (tag.model !== undefined && typeof tag.model !== "string")) throw new Error("Invalid Ollama model entry")
+      return tag as OllamaTagModel
+    })
   }
-
-  async show(model: string): Promise<OllamaShowResponse> {
-    return this.request<OllamaShowResponse>(
-      "/api/show",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model }),
-      },
-      Math.max(this.options.timeoutMs, 3_000),
-    )
-  }
-
+  async show(model: string, signal?: AbortSignal): Promise<OllamaShowResponse> { return this.request("/api/show", { model }, signal) }
   async running(): Promise<OllamaRunningModel[]> {
-    const response = await this.request<OllamaPsResponse>("/api/ps")
-    return Array.isArray(response.models) ? response.models : []
+    const raw = await this.request("/api/ps")
+    if (!Array.isArray(raw.models)) throw new Error("Invalid Ollama running-model list")
+    return raw.models.filter((value: unknown) => typeof object(value)?.name === "string") as OllamaRunningModel[]
   }
-
   async discover(concurrency = 4): Promise<OllamaDiscoveryModel[]> {
     const tags = await this.tags()
-    const result: OllamaDiscoveryModel[] = new Array(tags.length)
+    const result: OllamaDiscoveryModel[] = []
+    const deadline = signalWithTimeout(8000)
     let cursor = 0
-
     const worker = async () => {
       while (cursor < tags.length) {
-        const index = cursor
-        cursor += 1
-        const tag = tags[index]
+        const tag = tags[cursor++]
         const id = tag.model || tag.name
         let show: OllamaShowResponse | undefined
-        try {
-          show = await this.show(id)
-        } catch {
-          show = undefined
-        }
-        const details = show?.details ?? tag.details ?? {}
-        const modelInfo = show?.model_info ?? {}
-        const capabilities = Array.isArray(show?.capabilities) ? show.capabilities.filter((item) => typeof item === "string") : []
-        result[index] = {
-          tag,
-          show,
-          metadata: {
-            id,
-            family: details.family,
-            families: Array.isArray(details.families) ? details.families : details.family ? [details.family] : [],
-            format: details.format,
-            parameterSize: details.parameter_size,
-            quantization: details.quantization_level,
-            fileSizeBytes: positiveNumber(tag.size) ?? 0,
-            contextLength: extractContextLength(modelInfo, show?.parameters),
-            capabilities,
-            modelInfo,
-          },
-        }
+        if (!deadline.aborted) { try { show = await this.show(id, deadline) } catch {} }
+        const details = { ...object(tag.details), ...object(show?.details) }
+        const info = object(show?.model_info) ?? {}
+        result.push({ tag, show, metadata: { id, family: text(details.family), families: strings(details.families),
+          format: text(details.format), parameterSize: text(details.parameter_size), quantization: text(details.quantization_level),
+          fileSizeBytes: finitePositive(tag.size) ?? 0, contextLength: extractContextLength(info, text(show?.parameters)),
+          capabilities: strings(show?.capabilities), modelInfo: info } })
       }
     }
-
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, tags.length || 1)) }, worker))
-    return result.filter(Boolean)
+    const workers = Math.min(8, Math.max(1, Math.floor(finitePositive(concurrency) ?? 4)), tags.length)
+    await Promise.all(Array.from({ length: workers }, worker))
+    return result.sort((a, b) => a.metadata.id.localeCompare(b.metadata.id))
   }
-
-  async benchmark(input: {
-    model: string
-    contextTokens: number
-    outputTokens?: number
-    prompt?: string
-    keepAlive?: string
-  }): Promise<OllamaBenchmarkResult> {
+  async benchmark(input: { model: string; contextTokens: number; outputTokens?: number; prompt?: string; keepAlive?: string; signal?: AbortSignal }): Promise<OllamaBenchmarkResult> {
+    if (!Number.isSafeInteger(input.contextTokens) || input.contextTokens < 2) throw new Error("Benchmark context must be at least 2 tokens")
+    const output = input.outputTokens ?? 96
+    if (!Number.isSafeInteger(output) || output < 1) throw new Error("Benchmark output must be a positive integer")
     const started = performance.now()
-    let firstTokenAt: number | undefined
+    let first: number | undefined, sample = ""
     let final: Record<string, unknown> | undefined
-    let sample = ""
-
-    const response = await this.options.fetch(`${this.host}/api/chat`, {
-      method: "POST",
-      headers: {
-        ...authHeaders(this.options),
-        "Content-Type": "application/json",
-      },
-      signal: abortSignal(Math.max(this.options.timeoutMs, 120_000)),
-      body: JSON.stringify({
-        model: input.model,
-        stream: true,
-        keep_alive: input.keepAlive ?? "5m",
-        truncate: false,
-        messages: [
-          {
-            role: "user",
-            content:
-              input.prompt ??
-              "Return a compact TypeScript function that adds two numbers. Do not call tools and do not add commentary.",
-          },
-        ],
-        options: {
-          num_ctx: input.contextTokens,
-          num_predict: input.outputTokens ?? 96,
-          temperature: 0,
-        },
-      }),
-    })
-
-    if (!response.ok || !response.body) return jsonOrError(response)
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let pending = ""
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      pending += decoder.decode(value, { stream: true })
-      const lines = pending.split("\n")
-      pending = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.trim()) continue
-        const chunk = JSON.parse(line) as Record<string, any>
-        const content = String(chunk.message?.content ?? chunk.message?.thinking ?? "")
-        if (content && firstTokenAt === undefined) firstTokenAt = performance.now()
-        if (content && sample.length < 500) sample += content.slice(0, 500 - sample.length)
-        if (chunk.done) final = chunk
-      }
+    const signal = signalWithTimeout(120000, input.signal)
+    const headers = ollamaHeaders(this.options)
+    headers.set("Content-Type", "application/json")
+    const response = await this.fetcher(`${this.host}/api/chat`, { method: "POST", redirect: "error", headers, signal,
+      body: JSON.stringify({ model: input.model, stream: true, keep_alive: input.keepAlive ?? "5m", truncate: false,
+        messages: [{ role: "user", content: input.prompt ?? "Return a compact TypeScript function that adds two numbers. Do not call tools." }],
+        options: { num_ctx: input.contextTokens, num_predict: Math.min(output, input.contextTokens - 1), temperature: 0 } }) })
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Ollama benchmark failed (HTTP ${response.status})`) }
+    for await (const chunk of readNdjson(response.body, signal)) {
+      if (chunk.error !== undefined) throw new Error("Ollama benchmark returned an error")
+      const message = object(chunk.message)
+      const emitted = [message?.thinking, message?.content].filter((value): value is string => typeof value === "string" && value.length > 0).join("")
+      if (emitted && first === undefined) first = performance.now()
+      if (sample.length < 500) sample += emitted.slice(0, 500 - sample.length)
+      if (chunk.done === true) { final = chunk; break }
     }
-
-    if (pending.trim()) {
-      const chunk = JSON.parse(pending) as Record<string, any>
-      if (chunk.done) final = chunk
-    }
-
-    const wallDurationMs = performance.now() - started
-    const totalDurationNs = positiveNumber(final?.total_duration)
-    const loadDurationNs = positiveNumber(final?.load_duration)
-    return {
-      model: input.model,
-      contextTokens: input.contextTokens,
-      wallDurationMs,
-      timeToFirstTokenMs: firstTokenAt === undefined ? undefined : firstTokenAt - started,
-      promptTokens: positiveNumber(final?.prompt_eval_count),
-      promptTokensPerSecond: durationRate(final?.prompt_eval_count, final?.prompt_eval_duration),
-      outputTokens: positiveNumber(final?.eval_count),
-      outputTokensPerSecond: durationRate(final?.eval_count, final?.eval_duration),
-      loadDurationMs: loadDurationNs === undefined ? undefined : loadDurationNs / 1_000_000,
-      totalDurationMs: totalDurationNs === undefined ? undefined : totalDurationNs / 1_000_000,
-      sample,
-    }
+    if (!final || first === undefined || !sample || !finitePositive(final.eval_count)) throw new Error("Benchmark produced no valid completed output")
+    const total = finitePositive(final.total_duration), load = finitePositive(final.load_duration)
+    return { model: input.model, contextTokens: input.contextTokens, wallDurationMs: performance.now() - started,
+      timeToFirstTokenMs: first - started, promptTokens: finitePositive(final.prompt_eval_count),
+      promptTokensPerSecond: rate(final.prompt_eval_count, final.prompt_eval_duration), outputTokens: finitePositive(final.eval_count),
+      outputTokensPerSecond: rate(final.eval_count, final.eval_duration), loadDurationMs: load === undefined ? undefined : load / 1e6,
+      totalDurationMs: total === undefined ? undefined : total / 1e6, sample }
   }
 }

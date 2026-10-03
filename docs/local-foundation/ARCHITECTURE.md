@@ -1,92 +1,39 @@
-# Local-first foundation
+# OpenCode Local runtime architecture
 
-This branch adds a local-runtime layer to OpenCode without replacing its mature UI, sessions, tools, MCP, skills, provider catalogue, or cloud backends.
+This is an unofficial experimental fork of `anomalyco/opencode`, maintained separately by `wandoth1`. The first hardware target is Windows and NVIDIA RTX 5070. FX is a conceptual reference for separation of agent, provider and transport, not an embedded Zig runtime. The original MIT license is unchanged.
 
-The design borrows the useful boundary from `vercel-labs/fx`—agent, provider, transport—while keeping the implementation independent and TypeScript-native. No FX source code is copied.
+## Boundaries
 
-## Runtime flow
+- `runtime.ts`: backend-neutral metadata and diagnostic types.
+- `hardware.ts`: bounded NVIDIA telemetry collection; no CUDA/kernel changes.
+- `context-budget.ts`: estimated memory/context budgets, not empirical GPU-fit guarantees.
+- `ollama/client.ts`: native discovery and a small benchmark.
+- `ollama/io.ts`: byte-bounded JSON/NDJSON with strict UTF-8 and cancellation.
+- `ollama/model.ts`: reported capabilities and explicit user overrides, without guessing support from names.
+- `ollama/integration.ts`: separately trusted global configuration, credential binding and in-memory provider construction.
+- `ollama/transport.ts`: endpoint-bound OpenAI-compatible adapter to native Ollama chat.
+- `doctor.ts` and the CLI: real user/project configuration, explicit flags and an allowlisted report.
 
-```text
-OpenCode agent / tools / sessions
-             |
-      provider configuration
-             |
-       Ollama integration
-       |               |
- model discovery   native transport
- /api/tags         /api/chat (NDJSON)
- /api/show              |
- /api/ps           OpenAI SSE adapter
-             \          /
-              context budget
-                    |
-          NVIDIA telemetry / VRAM
-                    |
-              local model
-```
+The existing OpenCode agent/tool permission machinery is retained. Local inference does not sandbox a project's commands, plugins or configuration.
 
-## Main components
+## Transport contract
 
-- `src/local/hardware.ts` reads conservative NVIDIA telemetry through `nvidia-smi`.
-- `src/local/context-budget.ts` estimates model residency and KV-cache bytes per token from GGUF metadata.
-- `src/local/ollama/client.ts` provides bounded native Ollama discovery, introspection, and benchmarking.
-- `src/local/ollama/model.ts` maps native model metadata into OpenCode provider configuration.
-- `src/local/ollama/transport.ts` translates OpenAI-compatible requests to `/api/chat` and converts Ollama NDJSON back to incremental OpenAI SSE. This preserves time-to-first-token and enables request-specific `num_ctx`.
-- `src/local/ollama/integration.ts` injects the provider at runtime only when Ollama is reachable or explicitly configured.
-- `src/plugin/ollama.ts` is the built-in plugin entry point.
-- `opencode local doctor` exposes diagnostics and an optional benchmark.
+Text and thinking are streamed incrementally with pull-based backpressure. Native tool calls are accumulated by ID/index and validated as JSON objects before being released at the native `done` frame. This intentionally delays tools, not text, to avoid executing partial calls. Unindexed calls are independent: identical unindexed calls cannot safely be deduplicated without an identity supplied by the backend.
 
-## Safety and compatibility
+Premature EOF, invalid UTF-8/JSON, unknown tools and length-truncated tool calls are errors, not successful completion. Cancellation releases the upstream reader. Native requests support `tool_choice` auto/none; required/named choices fail explicitly instead of being silently ignored. Images must be data URIs; the adapter never downloads external image URLs.
 
-- `dev` remains untouched; all development is isolated on `feature/local-foundation`.
-- Existing providers and the default OpenCode request pipeline are unchanged.
-- Automatic detection defaults to loopback only. Remote hosts must be explicitly configured.
-- Native transport can be disabled with `OPENCODE_OLLAMA_NATIVE_TRANSPORT=0`.
-- Local integration can be disabled with `OPENCODE_LOCAL_DISABLE=1` or `disabled_providers: ["ollama"]`.
-- The transport sets `truncate: false`; OpenCode must compact context rather than silently losing system or tool history.
-- Context estimates are conservative recommendations, not claims that every backend build or quantization will use identical memory.
+## Trust and credentials
 
-## Context policy
+Remote endpoints must originate from an explicit environment host, separately loaded global user configuration or a CLI override. Credentials are bound to the entire normalized endpoint, including port and path. Project credentials/headers and model-level network overrides are not inherited. Redirects and embedded URL credentials are rejected. The SDK receives a placeholder key; real credentials live in the endpoint-bound transport closure.
 
-The recommendation takes the minimum of model capability and estimated hardware capacity:
+There is no global snapshot/cache shared between projects. Diagnostics serialize only selected fields and exclude raw config, headers, arbitrary model metadata and generated benchmark samples.
 
-```text
-currently free VRAM
-- estimated quantized model residency
-- runtime overhead
-- safety reserve
-= KV-cache budget
-```
+## Memory estimates
 
-When architecture metadata is available, KV bytes per token are estimated as:
+The conventional KV estimate uses layer count, KV heads, explicit key/value dimensions when available and bytes per element. Model size, runtime overhead and a safety reserve are also considered. Loaded memory is reclaimed only within physical limits on a single observed GPU. Multi-GPU allocations are not pooled without placement evidence. A remote endpoint is never sized using the client's GPU.
 
-```text
-2 (K + V)
-* block count
-* KV head count
-* head dimension
-* cache bytes per element
-```
+Unknown metadata lowers confidence. A context override cannot raise a declared native maximum. Output and history remain inside the final context. An estimate does not prove hardware residency, throughput or correctness of every model architecture. A direct llama.cpp provider, continuous monitoring and measured RTX 5070 tuning remain outside this milestone.
 
-The result is rounded down to a stable context step. The agent-history recommendation follows the conservative FX-style principle of reserving output capacity and assigning only a fraction of the remaining window to durable history.
+## Repository automation
 
-## Scope of this milestone
-
-Implemented:
-
-- automatic Ollama detection and model discovery;
-- model capabilities and metadata mapping;
-- request-specific native context control;
-- streaming native transport;
-- NVIDIA/VRAM diagnostics;
-- adaptive context recommendation;
-- short reproducible benchmark;
-- unit tests and documentation.
-
-Deferred deliberately:
-
-- direct `llama.cpp-server` backend;
-- AMD/Intel GPU telemetry;
-- automatic runtime selection between Ollama and llama.cpp;
-- UI panels beyond the CLI doctor command;
-- empirical tuning from the target RTX 5070, which requires running the doctor command on the actual machine.
+Validation is read-only on committed source. Archive reconstruction, automatic source edits, automatic commits, upstream maintenance schedules and publishing are not part of this fork's CI. Old commits remain in Git history for accountability, but archive chunks are removed from the current tree.

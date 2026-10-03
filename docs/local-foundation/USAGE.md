@@ -1,102 +1,48 @@
-# Using the local runtime
+# Running the experimental local branch
 
-## Zero-configuration Ollama
+Use `feature/local-foundation`, not the upstream installer or npm package. This is a source-level experimental fork and is not a measured RTX 5070 performance release.
 
-Start Ollama normally. OpenCode probes the loopback server and adds installed models under the `ollama` provider:
-
-```text
-ollama/<model-name>
+```bash
+git clone --single-branch --branch feature/local-foundation https://github.com/wandoth1/opencode-local.git
+cd opencode-local
+bun install --frozen-lockfile
+cd packages/opencode
+bun run --conditions=browser src/index.ts local doctor --json
 ```
 
-No fake model catalogue entry or API key is required. The compatibility key `ollama` is supplied internally because Ollama ignores it.
+The repository pins Bun 1.3.14. The command loads the actual OpenCode global and project configuration. Standard OpenCode project configuration can contain executable tools/plugins: review untrusted repositories before opening them.
 
-## Diagnostics
+## Local Ollama
 
-```powershell
-opencode local doctor
-```
-
-Machine-readable output:
-
-```powershell
-opencode local doctor --json
-```
-
-Run a short benchmark against a selected model:
-
-```powershell
-opencode local doctor --model qwen3-coder:8b --benchmark
-```
-
-The benchmark reports time to first token, prompt processing speed, output speed, load duration, and the context used.
-
-## Useful environment variables
+Start Ollama separately. Installed chat models are discovered on loopback. Missing capabilities are not guessed; older Ollama or custom models may need explicit `tool_call`, `reasoning` or `attachment` declarations under `provider.ollama.models`.
 
 ```powershell
 $env:OPENCODE_OLLAMA_HOST = "http://127.0.0.1:11434"
-$env:OPENCODE_OLLAMA_NUM_CTX = "24576"
-$env:OPENCODE_OLLAMA_KEEP_ALIVE = "10m"
+bun run --conditions=browser src/index.ts local doctor --model "YOUR_INSTALLED_MODEL" --num-ctx 8192 --benchmark --output-tokens 96 --json > doctor.json
 ```
 
-Disable the native request adapter and fall back to Ollama's `/v1` compatibility endpoint:
+Replace `YOUR_INSTALLED_MODEL` with an actual installed tag. The benchmark loads the model and can use substantial VRAM. Do not publish private model names or system details without reviewing the report. No API keys, raw config, headers or generated sample text are included.
 
-```powershell
-$env:OPENCODE_OLLAMA_NATIVE_TRANSPORT = "0"
+`--host`, `--model`, `--num-ctx`, `--benchmark`, `--output-tokens` and `--json` are supported. Context is capped at a known model maximum. A configuration limit is a request, not proof the allocation will fit the GPU. The reported CUDA banner is driver compatibility, not the installed CUDA toolkit.
+
+## Remote and authenticated deployments
+
+Use a trusted global user config, `OPENCODE_OLLAMA_HOST`/`OLLAMA_HOST`, or explicit `--host` for remote servers. Configure secrets only in the trusted user scope or `OPENCODE_OLLAMA_API_KEY`. Credentials are not transferred when a project/CLI changes to another endpoint, including another port or path on the same host. HTTP redirects are disabled.
+
+Project API keys/headers and per-model endpoint/npm/fetch overrides are intentionally ignored by the built-in integration. Custom proxy headers must be in global user configuration. Use HTTPS for remote authenticated services; HTTP is suitable for trusted local loopback, not an untrusted network.
+
+Set `OPENCODE_LOCAL_DISABLE=1` to opt out. `disabled_providers` and `enabled_providers` are respected. `OPENCODE_OLLAMA_AUTODETECT=0` disables discovery and requires manually configured models. `numCtx`, `keepAlive`, `discoveryTimeoutMs`, `nativeTransport` and capability overrides remain supported as safe runtime settings.
+
+The client cannot inspect Ollama's server environment. KV estimation defaults to two bytes per element. `OPENCODE_OLLAMA_KV_BYTES_PER_ELEMENT` is an explicit estimation override only; it does not configure Ollama or prove its cache precision. Use measured server settings and allow for quantization block overhead.
+
+## Verification
+
+From `packages/opencode`:
+
+```bash
+bun run typecheck
+bun test test/local --timeout 30000
+bun test test/provider/provider.test.ts test/plugin/modal-models.test.ts --timeout 30000
 ```
 
-Disable automatic detection:
-
-```powershell
-$env:OPENCODE_OLLAMA_AUTODETECT = "0"
-```
-
-Disable all local-runtime integration:
-
-```powershell
-$env:OPENCODE_LOCAL_DISABLE = "1"
-```
-
-## Explicit configuration
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "ollama": {
-      "options": {
-        "host": "http://127.0.0.1:11434",
-        "numCtx": 24576,
-        "keepAlive": "10m",
-        "nativeTransport": true,
-        "autoDiscover": true
-      }
-    }
-  }
-}
-```
-
-Advanced capability overrides are available for older Ollama versions that do not report model capabilities reliably:
-
-```jsonc
-{
-  "provider": {
-    "ollama": {
-      "options": {
-        "forceToolCall": true,
-        "forceReasoning": false,
-        "forceVision": false
-      }
-    }
-  }
-}
-```
-
-## First RTX 5070 validation
-
-Run:
-
-```powershell
-opencode local doctor --model <installed-model> --benchmark --json > opencode-local-doctor.json
-```
-
-The report contains no API credentials. Review it before sharing because GPU, CPU, driver, model names, and machine capacity are included.
+Linux and Windows CI must pass on the exact revision being reviewed. Mock/SDK contract tests are not a physical RTX 5070 test. Before production use, perform an independent re-audit and compare native Ollama against this agent with the same installed model, quantization, context and prompt. Record cold/warm runs, load time, TTFT, prompt/generation tokens per second, VRAM and whether the server reports CPU offload.

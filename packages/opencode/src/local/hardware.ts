@@ -1,103 +1,57 @@
-import os from "os"
-import { spawnSync } from "child_process"
+import os from "node:os"
+import path from "node:path"
+import { existsSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { MIB, type HardwareSnapshot, type NvidiaGpuSnapshot } from "./runtime"
-
-const NVIDIA_QUERY = [
-  "--query-gpu=index,name,driver_version,memory.total,memory.free,memory.used,utilization.gpu",
-  "--format=csv,noheader,nounits",
-]
-
-function parseCsvLine(line: string): string[] {
+const QUERY = ["--query-gpu=index,name,driver_version,memory.total,memory.free,memory.used,utilization.gpu", "--format=csv,noheader,nounits"]
+function csvLine(line: string): string[] {
   const values: string[] = []
-  let current = ""
-  let quoted = false
-
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index]
-    if (character === '"') {
-      if (quoted && line[index + 1] === '"') {
-        current += '"'
-        index += 1
-        continue
-      }
-      quoted = !quoted
-      continue
-    }
-    if (character === "," && !quoted) {
-      values.push(current.trim())
-      current = ""
-      continue
-    }
-    current += character
+  let value = "", quoted = false
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') {
+      if (quoted && line[i + 1] === '"') { value += '"'; i++ } else quoted = !quoted
+    } else if (line[i] === "," && !quoted) { values.push(value.trim()); value = "" }
+    else value += line[i]
   }
-
-  values.push(current.trim())
+  if (quoted) return []
+  values.push(value.trim())
   return values
 }
-
-function numberOrUndefined(raw: string | undefined): number | undefined {
-  if (!raw || raw === "N/A" || raw === "[Not Supported]") return undefined
-  const value = Number(raw)
-  return Number.isFinite(value) ? value : undefined
+function numeric(raw?: string) {
+  if (!raw?.trim()) return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
 }
-
 export function parseNvidiaSmiCsv(output: string, cudaVersion?: string): NvidiaGpuSnapshot[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      const [indexRaw, name, driverVersion, totalRaw, freeRaw, usedRaw, utilizationRaw] = parseCsvLine(line)
-      const index = numberOrUndefined(indexRaw)
-      const total = numberOrUndefined(totalRaw)
-      const free = numberOrUndefined(freeRaw)
-      const used = numberOrUndefined(usedRaw)
-      if (index === undefined || !name || total === undefined || free === undefined || used === undefined) return []
-      return [
-        {
-          index,
-          name,
-          driverVersion: driverVersion || undefined,
-          cudaVersion,
-          memoryTotalBytes: total * MIB,
-          memoryFreeBytes: free * MIB,
-          memoryUsedBytes: used * MIB,
-          utilizationPercent: numberOrUndefined(utilizationRaw),
-        },
-      ]
-    })
-}
-
-export function parseCudaVersion(output: string): string | undefined {
-  return /CUDA Version:\s*([0-9.]+)/i.exec(output)?.[1]
-}
-
-function runNvidiaSmi(args: string[]) {
-  const result = spawnSync("nvidia-smi", args, {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 3_000,
+  return output.replace(/^\uFEFF/, "").split(/\r?\n/).flatMap((line) => {
+    const [indexRaw, name, driver, totalRaw, freeRaw, usedRaw, utilizationRaw] = csvLine(line)
+    const index = numeric(indexRaw), total = numeric(totalRaw), free = numeric(freeRaw), used = numeric(usedRaw)
+    if (index === undefined || !Number.isInteger(index) || !name || !total || free === undefined || used === undefined) return []
+    if (free > total || used > total || total * MIB > Number.MAX_SAFE_INTEGER) return []
+    const utilization = numeric(utilizationRaw)
+    return [{ index, name, driverVersion: driver && !/N\/A|not supported/i.test(driver) ? driver : undefined,
+      cudaVersion, memoryTotalBytes: total * MIB, memoryFreeBytes: free * MIB, memoryUsedBytes: used * MIB,
+      utilizationPercent: utilization !== undefined && utilization <= 100 ? utilization : undefined }]
   })
-  if (result.error || result.status !== 0) return undefined
-  return String(result.stdout ?? "")
 }
-
+export function parseCudaVersion(output: string) { return /CUDA Version:\s*([0-9.]+)/i.exec(output)?.[1] }
+function executable() {
+  if (process.platform !== "win32") return "nvidia-smi"
+  const candidates = [path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe"),
+    path.join(process.env.ProgramFiles ?? "C:\\Program Files", "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")]
+  return candidates.find((candidate) => existsSync(candidate)) ?? "nvidia-smi.exe"
+}
+function run(args: string[]) {
+  const result = spawnSync(executable(), args, { encoding: "utf8", windowsHide: true, timeout: 3000, maxBuffer: 1024 * 1024, shell: false })
+  return result.error || result.status !== 0 ? undefined : String(result.stdout ?? "")
+}
 export function detectNvidiaGpus(): NvidiaGpuSnapshot[] {
-  const summary = runNvidiaSmi([])
-  const csv = runNvidiaSmi(NVIDIA_QUERY)
+  const csv = run(QUERY)
   if (!csv) return []
-  return parseNvidiaSmiCsv(csv, summary ? parseCudaVersion(summary) : undefined)
+  return parseNvidiaSmiCsv(csv, parseCudaVersion(run([]) ?? ""))
 }
-
 export function detectHardware(): HardwareSnapshot {
   const cpus = os.cpus()
-  return {
-    platform: process.platform,
-    architecture: process.arch,
-    cpuModel: cpus[0]?.model ?? "unknown",
-    cpuCount: cpus.length,
-    systemMemoryTotalBytes: os.totalmem(),
-    systemMemoryFreeBytes: os.freemem(),
-    nvidiaGpus: detectNvidiaGpus(),
-  }
+  return { platform: process.platform, architecture: process.arch, cpuModel: cpus[0]?.model ?? "unknown",
+    cpuCount: cpus.length, systemMemoryTotalBytes: os.totalmem(), systemMemoryFreeBytes: os.freemem(), nvidiaGpus: detectNvidiaGpus() }
 }

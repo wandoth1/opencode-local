@@ -1,433 +1,305 @@
-import { normalizeOllamaHost } from "./client"
-
+import { normalizeOllamaHost, ollamaHeaders } from "./client"
+import { boundedText, checkAbort, jsonObject, object, readNdjson, MAX_FRAME_BYTES, type Json } from "./io"
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-
 export interface OllamaNativeTransportOptions {
   host: string
   contexts: Record<string, number>
   keepAlive?: string
   enabled?: boolean
   fetch?: FetchLike
+  apiKey?: string
+  headers?: Record<string, string>
+  generationTimeoutMs?: number
 }
-
-type JsonRecord = Record<string, any>
-
-function asObject(value: unknown): JsonRecord | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : undefined
+function argumentsObject(value: unknown): Json {
+  if (value === undefined || value === "") return {}
+  if (typeof value === "string") return jsonObject(value)
+  const result = object(value)
+  if (!result) throw new Error("Tool arguments must be a JSON object")
+  return result
 }
-
-function parseArguments(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>
-  if (typeof value !== "string" || !value.trim()) return {}
-  try {
-    const parsed = JSON.parse(value)
-    return asObject(parsed) ?? {}
-  } catch {
-    return { value }
-  }
-}
-
-function extractImage(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined
-  const match = /^data:[^;]+;base64,(.+)$/i.exec(value)
-  return match?.[1]
-}
-
-function convertContent(content: unknown) {
-  if (typeof content === "string") return { content, images: [] as string[] }
-  if (!Array.isArray(content)) return { content: content == null ? "" : String(content), images: [] as string[] }
-
-  const text: string[] = []
-  const images: string[] = []
-  for (const part of content) {
-    const item = asObject(part)
-    if (!item) continue
-    if (item.type === "text" || item.type === "input_text") {
-      if (typeof item.text === "string") text.push(item.text)
-      continue
-    }
-    if (item.type === "image_url") {
-      const url = typeof item.image_url === "string" ? item.image_url : item.image_url?.url
-      const image = extractImage(url)
-      if (image) images.push(image)
-      continue
-    }
-    if (item.type === "input_image" || item.type === "image") {
-      const image = extractImage(item.image_url ?? item.image ?? item.data)
-      if (image) images.push(image)
-    }
+function contentParts(value: unknown): { content: string; images: string[] } {
+  if (value === null || value === undefined) return { content: "", images: [] }
+  if (typeof value === "string") return { content: value, images: [] }
+  if (!Array.isArray(value)) throw new Error("Unsupported message content")
+  const text: string[] = [], images: string[] = []
+  for (const raw of value) {
+    const part = object(raw)
+    if (!part) throw new Error("Invalid content part")
+    if (part.type === "text" || part.type === "input_text") {
+      if (typeof part.text !== "string") throw new Error("Invalid text part")
+      text.push(part.text)
+    } else if (["image_url", "input_image", "image"].includes(part.type)) {
+      const source = part.image_url ?? part.image ?? part.data
+      const url = typeof source === "string" ? source : object(source)?.url
+      const match = typeof url === "string" && /^data:image\/[a-z0-9.+-]+;base64,([a-z0-9+/]+={0,2})$/i.exec(url)
+      if (!match) throw new Error("Native Ollama images must be base64 data URIs; external URLs are not fetched")
+      images.push(match[1])
+    } else throw new Error("Unsupported content part in native Ollama transport")
   }
   return { content: text.join("\n"), images }
 }
-
-function messageThinking(message: JsonRecord) {
-  return [message.thinking, message.reasoning, message.reasoning_content].find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  )
-}
-
-function convertMessages(messages: unknown): JsonRecord[] {
-  if (!Array.isArray(messages)) return []
-  return messages.flatMap((raw) => {
-    const message = asObject(raw)
-    if (!message || typeof message.role !== "string") return []
-    const converted = convertContent(message.content)
-    const thinking = messageThinking(message)
-    const result: JsonRecord = {
-      role: message.role,
-      content: converted.content,
-      ...(thinking && message.role === "assistant" ? { thinking } : {}),
-      ...(converted.images.length ? { images: converted.images } : {}),
-    }
-
-    if (typeof message.tool_call_id === "string") result.tool_call_id = message.tool_call_id
-    if (typeof message.name === "string") result.tool_name = message.name
-    if (Array.isArray(message.tool_calls)) {
-      const calls = message.tool_calls.flatMap((rawCall: unknown, index: number) => {
-        const call = asObject(rawCall)
-        const fn = asObject(call?.function)
-        if (!fn || typeof fn.name !== "string") return []
-        return [
-          {
-            id: typeof call?.id === "string" ? call.id : `call_${index}`,
-            function: {
-              index,
-              name: fn.name,
-              arguments: parseArguments(fn.arguments),
-            },
-          },
-        ]
+function convertMessages(raw: unknown): Json[] {
+  if (!Array.isArray(raw)) throw new Error("messages must be an array")
+  const names = new Map<string, string>()
+  return raw.map((value) => {
+    const message = object(value)
+    if (!message || !["system", "developer", "user", "assistant", "tool"].includes(message.role)) throw new Error("Unsupported message role")
+    const parts = contentParts(message.content)
+    const result: Json = { role: message.role === "developer" ? "system" : message.role, content: parts.content }
+    if (parts.images.length) result.images = parts.images
+    const thinking = [message.thinking, message.reasoning, message.reasoning_content].find((item) => typeof item === "string" && item.length)
+    if (message.role === "assistant" && thinking) result.thinking = thinking
+    if (message.tool_calls !== undefined) {
+      if (!Array.isArray(message.tool_calls) || message.role !== "assistant") throw new Error("Invalid assistant tool calls")
+      result.tool_calls = message.tool_calls.map((item: unknown, index: number) => {
+        const call = object(item), fn = object(call?.function)
+        if (!fn || typeof fn.name !== "string" || !fn.name) throw new Error("Invalid tool function name")
+        if (typeof call?.id === "string") names.set(call.id, fn.name)
+        return { ...(typeof call?.id === "string" ? { id: call.id } : {}),
+          function: { index, name: fn.name, arguments: argumentsObject(fn.arguments) } }
       })
-      if (calls.length) result.tool_calls = calls
     }
-    return [result]
+    if (message.role === "tool") {
+      const id = typeof message.tool_call_id === "string" ? message.tool_call_id : undefined
+      const name = (id ? names.get(id) : undefined) ?? message.name
+      if (typeof name !== "string" || !name) throw new Error("Tool result cannot be correlated with an assistant call")
+      result.tool_name = name
+      if (id) result.tool_call_id = id
+    }
+    return result
   })
 }
-
-function reasoningSetting(body: JsonRecord): boolean | string | undefined {
-  const effort =
-    (typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined) ??
-    (typeof body.reasoning?.effort === "string" ? body.reasoning.effort : undefined)
-  if (!effort) return undefined
-  if (effort === "none") return false
-  if (effort === "minimal") return "low"
-  if (["low", "medium", "high"].includes(effort)) return effort
-  return true
-}
-
-function convertResponseFormat(value: unknown): unknown {
-  const format = asObject(value)
-  if (!format) return undefined
-  if (format.type === "json_object") return "json"
-  if (format.type === "json_schema") return format.json_schema?.schema ?? format.schema
-  return undefined
-}
-
-function requestTools(body: JsonRecord) {
-  if (body.tool_choice === "none") return undefined
-  return Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : undefined
-}
-
-export function openAIToOllamaRequest(body: JsonRecord, contextTokens: number | undefined, keepAlive?: string) {
-  const options: JsonRecord = {
-    ...(contextTokens ? { num_ctx: contextTokens } : {}),
-    ...(typeof body.max_tokens === "number" ? { num_predict: body.max_tokens } : {}),
-    ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
-    ...(typeof body.top_p === "number" ? { top_p: body.top_p } : {}),
-    ...(typeof body.seed === "number" ? { seed: body.seed } : {}),
-    ...(typeof body.frequency_penalty === "number" ? { frequency_penalty: body.frequency_penalty } : {}),
-    ...(typeof body.presence_penalty === "number" ? { presence_penalty: body.presence_penalty } : {}),
-    ...(body.stop !== undefined
-      ? { stop: Array.isArray(body.stop) ? body.stop : typeof body.stop === "string" ? [body.stop] : body.stop }
-      : {}),
+function thinking(body: Json): boolean | string | undefined {
+  const effort = body.reasoning_effort ?? object(body.reasoning)?.effort
+  if (effort === undefined) return undefined
+  if (!["none", "minimal", "low", "medium", "high", "max"].includes(effort)) throw new Error("Unsupported reasoning effort")
+  if (/gpt[-_]?oss/i.test(String(body.model))) {
+    if (effort === "none") throw new Error("GPT-OSS cannot disable thinking")
+    return effort === "minimal" ? "low" : effort === "max" ? "high" : effort
   }
-
-  return {
-    model: body.model,
-    messages: convertMessages(body.messages),
-    stream: body.stream !== false,
-    tools: requestTools(body),
-    format: convertResponseFormat(body.response_format),
-    keep_alive: keepAlive,
-    options,
-    think: reasoningSetting(body),
-    truncate: false,
+  return effort !== "none"
+}
+function responseFormat(value: unknown) {
+  if (value === undefined) return undefined
+  const format = object(value)
+  if (format?.type === "text") return undefined
+  if (format?.type === "json_object") return "json"
+  if (format?.type === "json_schema") {
+    const schema = object(format.json_schema)?.schema ?? format.schema
+    if (object(schema)) return schema
   }
+  throw new Error("Unsupported structured output format")
 }
-
-function createdSeconds(createdAt: unknown) {
-  const parsed = typeof createdAt === "string" ? Date.parse(createdAt) : Number.NaN
-  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : Math.floor(Date.now() / 1000)
-}
-
-function toolCalls(raw: unknown) {
-  if (!Array.isArray(raw)) return []
-  return raw.flatMap((value, index) => {
-    const call = asObject(value)
-    const fn = asObject(call?.function)
-    if (!fn || typeof fn.name !== "string") return []
-    return [
-      {
-        index: typeof fn.index === "number" ? fn.index : index,
-        id: typeof call?.id === "string" && call.id ? call.id : `call_${index}`,
-        type: "function",
-        function: {
-          name: fn.name,
-          arguments: JSON.stringify(asObject(fn.arguments) ?? fn.arguments ?? {}),
-        },
-      },
-    ]
-  })
-}
-
-function finishReason(doneReason: unknown, sawTools: boolean) {
-  if (sawTools) return "tool_calls"
-  if (doneReason === "length") return "length"
-  return "stop"
-}
-
-function chunkPayload(input: {
-  id: string
-  model: string
-  created: number
-  delta: JsonRecord
-  finishReason: string | null
-  usage?: JsonRecord
-}) {
-  return {
-    id: input.id,
-    object: "chat.completion.chunk",
-    created: input.created,
-    model: input.model,
-    choices: [
-      {
-        index: 0,
-        delta: input.delta,
-        finish_reason: input.finishReason,
-      },
-    ],
-    ...(input.usage ? { usage: input.usage } : {}),
+export function openAIToOllamaRequest(body: Json, contextTokens?: number, keepAlive?: string) {
+  if (typeof body.model !== "string" || !body.model) throw new Error("A model name is required")
+  if (body.stream !== undefined && typeof body.stream !== "boolean") throw new Error("stream must be boolean")
+  if (body.n !== undefined && body.n !== 1) throw new Error("Native Ollama supports one completion per request")
+  if (body.tool_choice !== undefined && !["auto", "none"].includes(body.tool_choice)) throw new Error("Native Ollama only supports tool_choice auto or none")
+  const tools = body.tool_choice === "none" ? undefined : body.tools
+  if (tools !== undefined && (!Array.isArray(tools) || tools.some((tool) => !object(tool)?.function || tool.type !== "function"))) throw new Error("Only function tools are supported")
+  const options: Json = {}
+  if (contextTokens !== undefined) {
+    if (!Number.isSafeInteger(contextTokens) || contextTokens < 2) throw new Error("Context must contain at least two tokens")
+    options.num_ctx = contextTokens
   }
-}
-
-function completionPayload(chunk: JsonRecord, request: JsonRecord) {
-  const calls = toolCalls(chunk.message?.tool_calls)
-  return {
-    id: `chatcmpl-${crypto.randomUUID()}`,
-    object: "chat.completion",
-    created: createdSeconds(chunk.created_at),
-    model: String(chunk.model ?? request.model ?? ""),
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: String(chunk.message?.content ?? ""),
-          ...(chunk.message?.thinking ? { reasoning: String(chunk.message.thinking) } : {}),
-          ...(calls.length ? { tool_calls: calls } : {}),
-        },
-        finish_reason: finishReason(chunk.done_reason, calls.length > 0),
-      },
-    ],
-    usage: {
-      prompt_tokens: Number(chunk.prompt_eval_count ?? 0),
-      completion_tokens: Number(chunk.eval_count ?? 0),
-      total_tokens: Number(chunk.prompt_eval_count ?? 0) + Number(chunk.eval_count ?? 0),
-    },
+  const output = body.max_completion_tokens ?? body.max_tokens
+  if (output !== undefined) {
+    if (!Number.isSafeInteger(output) || output <= 0) throw new Error("Output token limit must be a positive integer")
+    options.num_predict = contextTokens ? Math.min(output, contextTokens - 1) : output
   }
-}
-
-function openAIError(status: number, body: string) {
-  let message = body
-  try {
-    const parsed = JSON.parse(body)
-    message = parsed.error ?? parsed.message ?? body
-  } catch {}
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: String(message || `Ollama request failed with status ${status}`),
-        type: "ollama_error",
-        param: null,
-        code: null,
-      },
-    }),
-    {
-      status,
-      headers: { "Content-Type": "application/json" },
-    },
-  )
-}
-
-async function bodyText(input: RequestInfo | URL, init: RequestInit | undefined) {
-  const body = init?.body
-  if (typeof body === "string") return body
-  if (body instanceof URLSearchParams) return body.toString()
-  if (body instanceof Blob) return body.text()
-  if (body instanceof Uint8Array) return new TextDecoder().decode(body)
-  if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body))
-  if (input instanceof Request) {
-    try {
-      return await input.clone().text()
-    } catch {
-      return undefined
-    }
+  for (const key of ["temperature", "top_p", "top_k", "seed", "frequency_penalty", "presence_penalty"]) {
+    if (body[key] === undefined) continue
+    if (typeof body[key] !== "number" || !Number.isFinite(body[key])) throw new Error("Invalid numeric generation option")
+    options[key] = body[key]
   }
-  return undefined
-}
-
-function requestHeaders(input: RequestInfo | URL, init: RequestInit | undefined) {
-  const headers = new Headers(input instanceof Request ? input.headers : undefined)
-  new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
-  headers.delete("content-length")
-  headers.delete("host")
-  headers.set("Content-Type", "application/json")
-  headers.set("Accept", "application/x-ndjson")
-  return headers
-}
-
-function isChatCompletions(input: RequestInfo | URL) {
-  const raw = input instanceof Request ? input.url : String(input)
-  try {
-    return new URL(raw).pathname.endsWith("/chat/completions")
-  } catch {
-    return raw.includes("/chat/completions")
+  if (body.stop != null) {
+    const stop = typeof body.stop === "string" ? [body.stop] : body.stop
+    if (!Array.isArray(stop) || stop.some((item) => typeof item !== "string")) throw new Error("stop must contain strings")
+    options.stop = stop
   }
+  return { model: body.model, messages: convertMessages(body.messages), stream: body.stream === true,
+    tools: tools?.length ? tools : undefined, format: responseFormat(body.response_format), keep_alive: keepAlive,
+    options, think: thinking(body), truncate: false }
 }
-
-function streamResponse(response: Response, request: JsonRecord) {
-  if (!response.body) return response
-  const id = `chatcmpl-${crypto.randomUUID()}`
-  let roleSent = false
-  let sawTools = false
-  let emittedTools = false
-  let pending = ""
-  let cancelled = false
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      reader = response.body!.getReader()
-      const emit = (payload: unknown) => {
-        if (!cancelled) controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+interface ToolState { index: number; id: string; name: string; args: string | Json; fragmented: boolean }
+/** Tool payloads are bounded and held until done. Never execute incomplete JSON. */
+class ToolAccumulator {
+  private readonly states: ToolState[] = []
+  private readonly aliases = new Map<string, ToolState>()
+  constructor(private readonly allowed: Set<string>) {}
+  add(raw: unknown) {
+    if (raw === undefined) return
+    if (!Array.isArray(raw)) throw new Error("Invalid native tool calls")
+    for (const value of raw) {
+      const call = object(value), fn = object(call?.function)
+      if (!fn) throw new Error("Invalid native tool function")
+      const rawIndex = call?.index ?? fn.index
+      if (rawIndex !== undefined && (!Number.isSafeInteger(rawIndex) || rawIndex < 0)) throw new Error("Invalid native tool index")
+      const id = typeof call?.id === "string" && call.id ? call.id : undefined
+      if (id && id.length > 256) throw new Error("Native tool ID too long")
+      const indexKey = rawIndex !== undefined ? `index:${rawIndex}` : undefined
+      const idKey = id ? `id:${id}` : undefined
+      let state = (idKey && this.aliases.get(idKey)) || (indexKey && this.aliases.get(indexKey)) || undefined
+      if (!state) {
+        if (this.states.length >= 128) throw new Error("Too many native tool calls")
+        if (typeof fn.arguments === "string" && !idKey && !indexKey) throw new Error("Fragmented tool arguments require an ID or index")
+        state = { index: this.states.length, id: id ?? `call_${crypto.randomUUID()}`, name: "", args: {}, fragmented: false }
+        this.states.push(state)
       }
-      const processLine = (line: string) => {
-        if (!line.trim()) return
-        const chunk = JSON.parse(line) as JsonRecord
-        if (chunk.error) throw new Error(String(chunk.error))
-        const calls = toolCalls(chunk.message?.tool_calls)
-        if (calls.length) sawTools = true
-        const delta: JsonRecord = {
-          ...(!roleSent ? { role: "assistant" } : {}),
-          ...(chunk.message?.content ? { content: String(chunk.message.content) } : {}),
-          ...(chunk.message?.thinking ? { reasoning: String(chunk.message.thinking) } : {}),
-          ...(calls.length && !emittedTools ? { tool_calls: calls } : {}),
-        }
-        if (calls.length) emittedTools = true
-        if (Object.keys(delta).length) {
-          roleSent = true
-          emit(
-            chunkPayload({
-              id,
-              model: String(chunk.model ?? request.model ?? ""),
-              created: createdSeconds(chunk.created_at),
-              delta,
-              finishReason: null,
-            }),
-          )
-        }
-        if (chunk.done) {
-          emit(
-            chunkPayload({
-              id,
-              model: String(chunk.model ?? request.model ?? ""),
-              created: createdSeconds(chunk.created_at),
-              delta: {},
-              finishReason: finishReason(chunk.done_reason, sawTools),
-              usage: {
-                prompt_tokens: Number(chunk.prompt_eval_count ?? 0),
-                completion_tokens: Number(chunk.eval_count ?? 0),
-                total_tokens: Number(chunk.prompt_eval_count ?? 0) + Number(chunk.eval_count ?? 0),
-              },
-            }),
-          )
-          if (!cancelled) controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+      for (const alias of [idKey, indexKey]) {
+        if (!alias) continue
+        const previous = this.aliases.get(alias)
+        if (previous && previous !== state) throw new Error("Conflicting native tool identity")
+        this.aliases.set(alias, state)
+      }
+      if (id) state.id = id
+      if (fn.name !== undefined) {
+        if (typeof fn.name !== "string" || fn.name.length > 256) throw new Error("Invalid native tool name")
+        if (!state.name || fn.name.startsWith(state.name)) state.name = fn.name
+        else if (fn.name !== state.name) {
+          if (this.allowed.has(state.name)) throw new Error("Conflicting native tool name")
+          state.name += fn.name
         }
       }
-
-      void (async () => {
-        try {
-          while (!cancelled) {
-            const { done, value } = await reader!.read()
-            if (done) break
-            pending += decoder.decode(value, { stream: true })
-            const lines = pending.split("\n")
-            pending = lines.pop() ?? ""
-            for (const line of lines) processLine(line)
-          }
-          pending += decoder.decode()
-          if (!cancelled && pending.trim()) processLine(pending)
-          if (!cancelled) controller.close()
-        } catch (error) {
-          if (!cancelled) controller.error(error)
-        } finally {
-          reader?.releaseLock()
+      if (fn.arguments !== undefined) {
+        if (typeof fn.arguments === "string") {
+          if (!state.fragmented && Object.keys(state.args).length) throw new Error("Mixed native tool argument encodings")
+          state.args = (state.fragmented ? state.args as string : "") + fn.arguments
+          state.fragmented = true
+        } else {
+          if (state.fragmented) throw new Error("Mixed native tool argument encodings")
+          state.args = { ...state.args as Json, ...argumentsObject(fn.arguments) }
         }
-      })()
-    },
-    async cancel(reason) {
-      cancelled = true
-      await reader?.cancel(reason).catch(() => undefined)
-    },
-  })
-
-  return new Response(stream, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  })
-}
-
-export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): FetchLike {
-  const host = normalizeOllamaHost(options.host)
-  const fetchFn: FetchLike = options.fetch ?? fetch
-  if (options.enabled === false) return fetchFn
-
-  return async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!isChatCompletions(input)) return fetchFn(input, init)
-    const rawBody = await bodyText(input, init)
-    if (!rawBody) return fetchFn(input, init)
-
-    let request: JsonRecord
-    try {
-      request = JSON.parse(rawBody) as JsonRecord
-    } catch {
-      return fetchFn(input, init)
+      }
+      if (this.states.reduce((sum, item) => sum + JSON.stringify(item).length, 0) > MAX_FRAME_BYTES) throw new Error("Native tool payload exceeds its size limit")
     }
-
-    const native = openAIToOllamaRequest(request, options.contexts[String(request.model)], options.keepAlive)
-    const response = await fetchFn(`${host}/api/chat`, {
-      ...init,
-      method: "POST",
-      headers: requestHeaders(input, init),
-      body: JSON.stringify(native),
-      signal: init?.signal ?? (input instanceof Request ? input.signal : undefined),
+  }
+  finish() {
+    const ids = new Set<string>()
+    return this.states.map((state) => {
+      if (!this.allowed.has(state.name) || ids.has(state.id)) throw new Error("Unknown or duplicate native tool call")
+      ids.add(state.id)
+      return { index: state.index, id: state.id, type: "function" as const,
+        function: { name: state.name, arguments: JSON.stringify(argumentsObject(state.args)) } }
     })
-
-    if (!response.ok) return openAIError(response.status, await response.text())
-    if (request.stream === false) {
-      const chunk = (await response.json()) as JsonRecord
-      return new Response(JSON.stringify(completionPayload(chunk, request)), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
+  }
+}
+function errorResponse(status: number, message: string) {
+  return new Response(JSON.stringify({ error: { message, type: "ollama_error", param: null, code: null } }),
+    { status, headers: { "Content-Type": "application/json" } })
+}
+function usage(chunk: Json) {
+  const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0
+  const prompt = count(chunk.prompt_eval_count), completion = count(chunk.eval_count)
+  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }
+}
+function allowedTools(request: Json) {
+  return new Set<string>((request.tool_choice === "none" ? [] : request.tools ?? []).map((tool: Json) => tool.function.name))
+}
+function finishReason(chunk: Json, hasTools: boolean) {
+  // A length limit must not be converted into a successful tool-call termination.
+  if (chunk.done_reason === "length") return "length"
+  return hasTools ? "tool_calls" : "stop"
+}
+function delta(chunk: Json): Json {
+  if (chunk.error !== undefined) throw new Error("Ollama reported a generation error")
+  const message = object(chunk.message) ?? {}
+  for (const key of ["content", "thinking"]) if (message[key] !== undefined && typeof message[key] !== "string") throw new Error("Invalid native message")
+  return { ...(message.content ? { content: message.content } : {}), ...(message.thinking ? { reasoning: message.thinking } : {}) }
+}
+function streamResponse(response: Response, request: Json, signal: AbortSignal, abort: AbortController) {
+  const iterator = readNdjson(response.body, signal)
+  const encoder = new TextEncoder()
+  const id = `chatcmpl-${crypto.randomUUID()}`, created = Math.floor(Date.now() / 1000)
+  const tools = new ToolAccumulator(allowedTools(request))
+  let roleSent = false, cancelled = false, finished = false
+  const frame = (content: Json, reason: string | null = null, stats?: Json) => ({ id, object: "chat.completion.chunk", created,
+    model: request.model, choices: [{ index: 0, delta: content, finish_reason: reason }], ...(stats ? { usage: stats } : {}) })
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (finished || cancelled) return
+      const emit = (payload: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+      try {
+        while (!cancelled) {
+          const next = await iterator.next()
+          if (cancelled) return
+          if (next.done) throw new Error("Ollama stream ended without a done frame")
+          const chunk = next.value
+          const content = delta(chunk)
+          tools.add(object(chunk.message)?.tool_calls)
+          if (!roleSent) { content.role = "assistant"; roleSent = true }
+          if (Object.keys(content).length) emit(frame(content))
+          if (chunk.done === true) {
+            const calls = tools.finish()
+            // Never release tools from a length-truncated generation.
+            if (calls.length && chunk.done_reason === "length") throw new Error("Ollama truncated a tool-call response")
+            if (calls.length) emit(frame({ tool_calls: calls }))
+            emit(frame({}, finishReason(chunk, calls.length > 0), usage(chunk)))
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+            finished = true
+            controller.close()
+            await iterator.return(undefined)
+            return
+          }
+          if (Object.keys(content).length) return
+        }
+      } catch (error) {
+        finished = true
+        abort.abort()
+        await iterator.return(undefined).catch(() => undefined)
+        if (!cancelled) controller.error(error instanceof Error ? error : new Error("Ollama stream failed"))
+      }
+    },
+    async cancel() { cancelled = true; abort.abort(); await iterator.return(undefined).catch(() => undefined) },
+  })
+  return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" } })
+}
+export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): FetchLike {
+  const host = normalizeOllamaHost(options.host), base = `${host}/v1/`
+  const fetcher = options.fetch ?? fetch
+  return async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    // The wrapper belongs to one endpoint. Model overrides cannot redirect its credentials.
+    if (!url.href.startsWith(base) || url.username || url.password || url.search || url.hash) {
+      return errorResponse(400, "Ollama transport refused a different endpoint")
     }
-    return streamResponse(response, request)
+    const abort = new AbortController()
+    const parent = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    const timeout = Math.min(600000, Math.max(1000, options.generationTimeoutMs ?? 300000))
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeout), ...(parent ? [parent] : [])])
+    checkAbort(signal)
+    const headers = ollamaHeaders(options)
+    headers.set("Content-Type", "application/json")
+    if (options.enabled === false || url.href !== `${base}chat/completions`) {
+      return fetcher(input, { ...init, headers, signal, redirect: "error" })
+    }
+    let request: Json, native: ReturnType<typeof openAIToOllamaRequest>
+    try {
+      const body = init?.body ?? (input instanceof Request ? input.clone().body : undefined)
+      if (!body) throw new Error("A JSON request body is required")
+      request = jsonObject(await boundedText(new Response(body).body, signal))
+      native = openAIToOllamaRequest(request, options.contexts[request.model], options.keepAlive)
+    } catch (error) {
+      checkAbort(signal)
+      return errorResponse(400, error instanceof Error ? error.message : "Invalid native request")
+    }
+    let response: Response
+    try { response = await fetcher(`${host}/api/chat`, { method: "POST", headers, body: JSON.stringify(native), signal, redirect: "error" }) }
+    catch { checkAbort(signal); return errorResponse(502, "Ollama connection failed (redirects are not allowed)") }
+    if (!response.ok) { await response.body?.cancel(); return errorResponse(response.status >= 400 ? response.status : 502, `Ollama returned HTTP ${response.status}`) }
+    if (native.stream) return streamResponse(response, request, signal, abort)
+    try {
+      const chunk = jsonObject(await boundedText(response.body, signal))
+      const content = delta(chunk)
+      if (chunk.done !== true) throw new Error("Ollama completion has no done frame")
+      const tools = new ToolAccumulator(allowedTools(request))
+      tools.add(object(chunk.message)?.tool_calls)
+      const calls = tools.finish()
+      if (calls.length && chunk.done_reason === "length") throw new Error("Ollama truncated a tool-call response")
+      return Response.json({ id: `chatcmpl-${crypto.randomUUID()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: request.model,
+        choices: [{ index: 0, message: { role: "assistant", content: content.content ?? "", ...(content.reasoning ? { reasoning: content.reasoning } : {}),
+          ...(calls.length ? { tool_calls: calls.map(({ index: _index, ...call }) => call) } : {}) }, finish_reason: finishReason(chunk, calls.length > 0) }], usage: usage(chunk) })
+    } catch (error) { checkAbort(signal); return errorResponse(502, error instanceof Error ? error.message : "Invalid Ollama completion") }
   }
 }

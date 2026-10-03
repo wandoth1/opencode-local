@@ -1,45 +1,10 @@
-import {
-  GIB,
-  MIB,
-  clamp,
-  finitePositive,
-  type ContextRecommendation,
-  type HardwareSnapshot,
-  type LocalModelMetadata,
-} from "./runtime"
-
-const CONTEXT_STEPS = [
-  262_144,
-  196_608,
-  131_072,
-  98_304,
-  65_536,
-  49_152,
-  32_768,
-  24_576,
-  16_384,
-  12_288,
-  8_192,
-  6_144,
-  4_096,
-  2_048,
-]
-
-const DEFAULT_CONTEXT = 16_384
-const MIN_CONTEXT = 4_096
-const DEFAULT_OUTPUT = 8_192
-const MODEL_RUNTIME_OVERHEAD = 384 * MIB
-const MIN_GPU_RESERVE = 768 * MIB
-const MODEL_SIZE_MULTIPLIER = 1.08
-const KV_SAFETY_FACTOR = 0.72
-
-interface ArchitectureShape {
-  blockCount?: number
-  embeddingLength?: number
-  headCount?: number
-  headCountKv?: number
-}
-
+import { GIB, MIB, clamp, finitePositive, type ContextRecommendation, type HardwareSnapshot, type LocalModelMetadata } from "./runtime"
+const STEPS = [262144, 196608, 131072, 98304, 65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096, 2048, 1024, 512, 256]
+const DEFAULT_CONTEXT = 16384
+const MIN_CONTEXT = 4096
+const DEFAULT_OUTPUT = 8192
+const OVERHEAD = 384 * MIB
+const RESERVE = 1024 * MIB
 export interface ContextBudgetInput {
   model: LocalModelMetadata
   hardware?: HardwareSnapshot
@@ -47,160 +12,98 @@ export interface ContextBudgetInput {
   loadedSizeVramBytes?: number
   kvCacheBytesPerElement?: number
 }
-
-function numberAt(info: Record<string, unknown>, key: string): number | undefined {
-  return finitePositive(info[key])
+function positiveInteger(value: unknown) {
+  const n = finitePositive(value)
+  return n !== undefined && Number.isInteger(n) ? n : undefined
 }
-
-function architectureShape(model: LocalModelMetadata): ArchitectureShape {
-  const info = model.modelInfo
-  const architecture =
-    (typeof info["general.architecture"] === "string" ? info["general.architecture"] : undefined) ?? model.family
-  if (!architecture) return {}
-  return {
-    blockCount: numberAt(info, `${architecture}.block_count`),
-    embeddingLength: numberAt(info, `${architecture}.embedding_length`),
-    headCount: numberAt(info, `${architecture}.attention.head_count`),
-    headCountKv:
-      numberAt(info, `${architecture}.attention.head_count_kv`) ?? numberAt(info, `${architecture}.attention.head_count`),
-  }
-}
-
 export function estimateKvBytesPerToken(model: LocalModelMetadata, bytesPerElement = 2): number | undefined {
-  const shape = architectureShape(model)
-  if (!shape.blockCount || !shape.embeddingLength || !shape.headCount || !shape.headCountKv) return undefined
-  const headDimension = shape.embeddingLength / shape.headCount
-  const result = 2 * shape.blockCount * shape.headCountKv * headDimension * bytesPerElement
-  return Number.isFinite(result) && result > 0 ? Math.ceil(result) : undefined
+  const info = model.modelInfo
+  const arch = typeof info["general.architecture"] === "string" ? info["general.architecture"] : model.family
+  if (!arch || !finitePositive(bytesPerElement)) return undefined
+  const get = (key: string) => finitePositive(info[`${arch}.${key}`])
+  const layers = get("block_count")
+  const heads = get("attention.head_count")
+  const kvHeads = get("attention.head_count_kv") ?? heads
+  const embedding = get("embedding_length")
+  const fallback = heads && embedding ? embedding / heads : undefined
+  const key = get("attention.key_length") ?? fallback
+  const value = get("attention.value_length") ?? fallback
+  if (!layers || !kvHeads || !key || !value) return undefined
+  const result = layers * kvHeads * (key + value) * bytesPerElement
+  return finitePositive(result) ? Math.ceil(result) : undefined
 }
-
-export function extractContextLength(modelInfo: Record<string, unknown>, parameters?: string): number | undefined {
-  const candidates = Object.entries(modelInfo)
-    .filter(([key]) => key.endsWith(".context_length"))
-    .flatMap(([, value]) => {
-      const parsed = finitePositive(value)
-      return parsed === undefined ? [] : [parsed]
-    })
-
-  const configured = /(?:^|\n)\s*num_ctx\s+(\d+)/i.exec(parameters ?? "")?.[1]
-  const configuredValue = finitePositive(configured)
-  if (configuredValue !== undefined) candidates.push(configuredValue)
-  if (candidates.length === 0) return undefined
-  return Math.max(...candidates)
+export function extractContextLength(info: Record<string, unknown>, parameters?: string): number | undefined {
+  const arch = typeof info["general.architecture"] === "string" ? info["general.architecture"] : undefined
+  const native = arch ? positiveInteger(info[`${arch}.context_length`]) : undefined
+  if (native) return native
+  const lengths = Object.entries(info).filter(([key]) => key.endsWith(".context_length"))
+    .map(([, value]) => positiveInteger(value)).filter((value): value is number => value !== undefined)
+  // A Modelfile num_ctx is a requested allocation, not permission to exceed the native maximum.
+  if (lengths.length) return Math.min(...lengths)
+  return positiveInteger(/(?:^|\n)\s*num_ctx\s+(\d+)/i.exec(parameters ?? "")?.[1])
 }
-
-function roundContextDown(tokens: number, minimum = MIN_CONTEXT) {
-  const rounded = CONTEXT_STEPS.find((step) => step <= tokens)
-  return Math.max(minimum, rounded ?? minimum)
+function roundDown(tokens: number) {
+  const floor = Math.max(1, Math.floor(tokens))
+  return STEPS.find((step) => step <= floor) ?? floor
 }
-
-function gpuBudget(hardware: HardwareSnapshot | undefined) {
-  const gpus = hardware?.nvidiaGpus ?? []
-  if (gpus.length === 0) return undefined
-  return {
-    total: gpus.reduce((sum, gpu) => sum + gpu.memoryTotalBytes, 0),
-    free: gpus.reduce((sum, gpu) => sum + gpu.memoryFreeBytes, 0),
-    count: gpus.length,
-  }
-}
-
-function outputBudget(context: number) {
-  return roundContextDown(Math.min(DEFAULT_OUTPUT, Math.max(2_048, Math.floor(context / 4))), 2_048)
-}
-
 export function recommendContext(input: ContextBudgetInput): ContextRecommendation {
-  const modelMaxContextTokens = Math.max(MIN_CONTEXT, input.model.contextLength ?? DEFAULT_CONTEXT)
-  const kvBytesPerToken = estimateKvBytesPerToken(input.model, input.kvCacheBytesPerElement ?? 2)
-  const fileBasedModelVram =
-    input.model.fileSizeBytes > 0
-      ? Math.ceil(input.model.fileSizeBytes * MODEL_SIZE_MULTIPLIER + MODEL_RUNTIME_OVERHEAD)
-      : undefined
-  const estimatedModelVramBytes = fileBasedModelVram ?? input.loadedSizeVramBytes ?? MODEL_RUNTIME_OVERHEAD
-  const budget = gpuBudget(input.hardware)
-  const reasons: string[] = []
-
-  let safeContext = Math.min(modelMaxContextTokens, DEFAULT_CONTEXT)
-  let availableVramBytes: number | undefined
-  let estimatedKvVramBytes: number | undefined
-  let expectedCpuOffload = false
-  let confidence: ContextRecommendation["confidence"] = "low"
-
-  if (!budget) {
-    reasons.push("No NVIDIA telemetry was available; using a conservative local default.")
-  } else {
-    const reserve = Math.max(MIN_GPU_RESERVE, Math.floor(budget.total * 0.08))
-    const reclaimableLoadedVram = input.loadedSizeVramBytes ?? 0
-    const effectiveFreeVram = budget.free + reclaimableLoadedVram
-    availableVramBytes = Math.max(0, effectiveFreeVram - estimatedModelVramBytes - reserve)
-    expectedCpuOffload = estimatedModelVramBytes + reserve > effectiveFreeVram
-    if (reclaimableLoadedVram > 0) {
-      reasons.push("The selected model is already loaded; its observed VRAM was added back before estimating a reload.")
-    }
-    if (budget.count > 1) reasons.push("VRAM was aggregated across multiple GPUs; actual Ollama placement may differ.")
-
-    if (expectedCpuOffload) {
-      safeContext = MIN_CONTEXT
-      reasons.push("The model is unlikely to fit completely in available VRAM, so CPU offload is expected.")
-      confidence = "medium"
-    } else if (kvBytesPerToken) {
-      const rawTokens = Math.floor((availableVramBytes * KV_SAFETY_FACTOR) / kvBytesPerToken)
-      safeContext = roundContextDown(clamp(rawTokens, MIN_CONTEXT, modelMaxContextTokens))
-      estimatedKvVramBytes = safeContext * kvBytesPerToken
-      reasons.push("Context was limited by the estimated KV cache and available NVIDIA VRAM.")
-      confidence = budget.count === 1 ? "high" : "medium"
-    } else {
-      safeContext = Math.min(modelMaxContextTokens, DEFAULT_CONTEXT)
-      reasons.push("Model architecture metadata was incomplete, so KV cache size could not be calculated exactly.")
-      confidence = "medium"
-    }
-  }
-
-  const requested = finitePositive(input.requestedContextTokens)
-  const recommendedContextTokens = requested
-    ? roundContextDown(Math.min(requested, modelMaxContextTokens), MIN_CONTEXT)
-    : safeContext
-
-  if (requested) {
-    if (requested > safeContext) {
-      reasons.push("A user context override exceeds the hardware-safe estimate and may cause offload or allocation failure.")
-      expectedCpuOffload = expectedCpuOffload || Boolean(budget)
-    } else {
-      reasons.push("A user context override was applied within the hardware-safe estimate.")
-    }
-  }
-
-  const recommendedOutputTokens = Math.min(recommendedContextTokens - 1, outputBudget(recommendedContextTokens))
-  const recommendedHistoryTokens = Math.max(
-    1_024,
-    Math.floor((recommendedContextTokens - recommendedOutputTokens) / 4),
+  const modelMaxContextTokens = positiveInteger(input.model.contextLength) ?? DEFAULT_CONTEXT
+  const minimum = Math.min(MIN_CONTEXT, modelMaxContextTokens)
+  const kv = estimateKvBytesPerToken(input.model, input.kvCacheBytesPerElement ?? 2)
+  const size = finitePositive(input.model.fileSizeBytes)
+  const loaded = finitePositive(input.loadedSizeVramBytes) ?? 0
+  const estimatedModelVramBytes = size ? Math.ceil(size * 1.08 + OVERHEAD) : loaded || OVERHEAD
+  const gpus = (input.hardware?.nvidiaGpus ?? []).filter((gpu) =>
+    finitePositive(gpu.memoryTotalBytes) && Number.isFinite(gpu.memoryFreeBytes) && gpu.memoryFreeBytes >= 0,
   )
-
-  return {
-    modelMaxContextTokens,
-    recommendedContextTokens,
-    recommendedOutputTokens,
-    recommendedHistoryTokens,
-    estimatedModelVramBytes,
-    estimatedKvBytesPerToken: kvBytesPerToken,
-    estimatedKvVramBytes,
-    availableVramBytes,
-    expectedCpuOffload,
-    confidence,
-    reasons,
+  // /api/ps does not identify the devices holding each model. Never sum GPUs or
+  // reclaim an aggregated model allocation on an arbitrary individual GPU.
+  const gpu = [...gpus].sort((a, b) => b.memoryFreeBytes - a.memoryFreeBytes)[0]
+  const reasons: string[] = ["VRAM and KV values are estimates, not a guarantee of full-GPU residency."]
+  let safe = Math.min(DEFAULT_CONTEXT, modelMaxContextTokens)
+  let availableVramBytes: number | undefined
+  let effective: number | undefined
+  let reserve = 0
+  let confidence: ContextRecommendation["confidence"] = "low"
+  if (!gpu) reasons.push("No local NVIDIA telemetry; no GPU-fit claim can be made.")
+  else {
+    reserve = Math.max(RESERVE, gpu.memoryTotalBytes * 0.08)
+    const free = clamp(gpu.memoryFreeBytes, 0, gpu.memoryTotalBytes)
+    const reclaim = gpus.length === 1 ? Math.min(loaded, gpu.memoryTotalBytes - free) : 0
+    effective = Math.min(gpu.memoryTotalBytes, free + reclaim)
+    if (reclaim) reasons.push("The selected model is already loaded; only its bounded observed allocation was reclaimed.")
+    if (gpus.length > 1) reasons.push("Multi-GPU placement is unknown; using one GPU, without reclaiming /api/ps totals.")
+    availableVramBytes = Math.max(0, effective - estimatedModelVramBytes - reserve)
+    if (kv && size) {
+      const raw = Math.floor(availableVramBytes * 0.72 / kv)
+      safe = Math.min(modelMaxContextTokens, Math.max(minimum, roundDown(raw)))
+      confidence = gpus.length === 1 ? "high" : "low"
+      reasons.push("Context was limited by the estimated KV cache and available NVIDIA VRAM.")
+    } else {
+      if (availableVramBytes === 0) safe = minimum
+      reasons.push("Incomplete model size or architecture metadata; GPU fit cannot be established.")
+    }
   }
+  const requested = positiveInteger(input.requestedContextTokens)
+  const recommendedContextTokens = Math.min(modelMaxContextTokens, requested ?? safe)
+  if (requested && requested > modelMaxContextTokens) reasons.push("Requested context was capped at the model maximum.")
+  if (requested) reasons.push(requested > safe ? "A user context override exceeds the hardware-safe estimate." : "A user context override was applied within the hardware-safe estimate.")
+  const estimatedKvVramBytes = kv ? recommendedContextTokens * kv : undefined
+  const expectedCpuOffload = effective !== undefined && (
+    estimatedModelVramBytes + reserve + (estimatedKvVramBytes ?? 0) > effective
+  )
+  if (expectedCpuOffload) reasons.push("CPU offload or allocation failure is possible. Reduce context or use a smaller model/quantization.")
+  // A pathological 1-token declaration must not be inflated; zero output/history is intentional.
+  const recommendedOutputTokens = Math.min(recommendedContextTokens - 1, DEFAULT_OUTPUT, Math.floor(recommendedContextTokens / 4))
+  const recommendedHistoryTokens = Math.floor((recommendedContextTokens - recommendedOutputTokens) / 4)
+  return { modelMaxContextTokens, recommendedContextTokens, recommendedOutputTokens, recommendedHistoryTokens,
+    estimatedModelVramBytes, estimatedKvBytesPerToken: kv, estimatedKvVramBytes, availableVramBytes,
+    expectedCpuOffload, confidence, reasons }
 }
-
-export function contextRiskLabel(recommendation: ContextRecommendation): "good" | "constrained" | "offload" {
-  if (recommendation.expectedCpuOffload) return "offload"
-  if (recommendation.recommendedContextTokens < 16_384 || recommendation.confidence === "low") return "constrained"
-  return "good"
+export function contextRiskLabel(value: ContextRecommendation): "good" | "constrained" | "offload" {
+  if (value.expectedCpuOffload) return "offload"
+  return value.recommendedContextTokens < DEFAULT_CONTEXT || value.confidence === "low" ? "constrained" : "good"
 }
-
-export const ContextBudgetDefaults = {
-  defaultContextTokens: DEFAULT_CONTEXT,
-  minimumContextTokens: MIN_CONTEXT,
-  defaultOutputTokens: DEFAULT_OUTPUT,
-  modelRuntimeOverheadBytes: MODEL_RUNTIME_OVERHEAD,
-  minimumGpuReserveBytes: MIN_GPU_RESERVE,
-  referenceConsumerGpuBytes: 12 * GIB,
-} as const
+export const ContextBudgetDefaults = { defaultContextTokens: DEFAULT_CONTEXT, minimumContextTokens: MIN_CONTEXT,
+  defaultOutputTokens: DEFAULT_OUTPUT, modelRuntimeOverheadBytes: OVERHEAD, minimumGpuReserveBytes: RESERVE,
+  referenceConsumerGpuBytes: 12 * GIB } as const
