@@ -18,8 +18,20 @@ export function daemonError(value: unknown, status?: number): LocalRuntimeError 
   if (/(?:does not|doesn't|do not|not) support.*tools|tools?.*(?:not supported|unsupported)/i.test(message)) {
     return new LocalRuntimeError("This Ollama model does not support tools. Select a tool-capable model for the coding agent.")
   }
+  if (/(?:does not|doesn't|do not|not) support.*thinking/i.test(message)) {
+    return new LocalRuntimeError("This Ollama model does not support thinking. Use the model without a reasoning variant or select a thinking-capable model.")
+  }
+  if (/only supports one image|(?:does not|doesn't|do not|not) support.*(?:images?|vision)/i.test(message)) {
+    return new LocalRuntimeError("This Ollama model cannot accept the attached images. Send fewer images or select a vision-capable model.")
+  }
   if (/out of memory|not enough.*memory|insufficient.*memory|requires more.*memory|unable to allocate|failed to allocate/i.test(message)) {
     return new LocalRuntimeError("Ollama could not allocate enough memory. Free GPU/RAM resources or select a smaller model; do not shrink context below the agent's needs.")
+  }
+  if (/runner process (?:has terminated|no longer running)|llama runner/i.test(message)) {
+    return new LocalRuntimeError("The Ollama model runner stopped unexpectedly. Check the daemon log; the model may not fit in the available memory.")
+  }
+  if (/invalid options?\b/i.test(message)) {
+    return new LocalRuntimeError("Ollama rejected a generation option. Check the options configured for provider.ollama and the selected model.")
   }
   if (/model.*(?:not found|does not exist)|pull.*model first/i.test(message) || status === 404) {
     return new LocalRuntimeError("The requested Ollama model or endpoint was not found. Check the model name and installed models.")

@@ -155,6 +155,27 @@ test("H1: overflow remains recognizable by the real core classifier without echo
   expect(isContextOverflow(body.error.message)).toBe(true)
   expect(JSON.stringify(body)).not.toContain("secret-fixture")
 })
+test("H1: common daemon failures map to actionable canonical messages without echoing the body", async () => {
+  // Daemon wording taken from Ollama v0.32.14 server/routes.go and server/prompt.go.
+  for (const [status, text, expected] of [
+    [400, '"gemma3:4b" does not support thinking PRIVATE_FIXTURE', "does not support thinking"],
+    [500, "this model only supports one image while more than one image requested PRIVATE_FIXTURE", "cannot accept the attached images"],
+    [500, "llama runner process has terminated: exit status 2 PRIVATE_FIXTURE", "runner stopped unexpectedly"],
+    [400, "invalid options: num_gpu PRIVATE_FIXTURE", "rejected a generation option"],
+    [500, "model requires more system memory (21.3 GiB) than is available (9.8 GiB) PRIVATE_FIXTURE", "could not allocate enough memory"],
+    [404, 'model "nope" not found, try pulling it first PRIVATE_FIXTURE', "was not found"],
+    [400, "registry.ollama.ai/library/gemma3:latest does not support tools PRIVATE_FIXTURE", "does not support tools"],
+    [418, "something this client does not classify PRIVATE_FIXTURE", "Ollama returned HTTP 418"],
+  ] as const) {
+    const native = createOllamaNativeFetch({ host, contexts: { fixture: 32768 }, fetch: async () => Response.json({ error: text }, { status }) })
+    const response = await native(endpoint, { method: "POST", body: JSON.stringify(payload()) })
+    const body = await response.json()
+    expect(response.status).toBe(status)
+    expect(body.error.message).toContain(expected)
+    expect(JSON.stringify(body)).not.toContain("PRIVATE_FIXTURE")
+    expect(isContextOverflow(body.error.message)).toBe(false)
+  }
+})
 test("H1: tool-incompatible models fail clearly before a generation request", async () => {
   let calls = 0
   const native = createOllamaNativeFetch({ host, contexts: { fixture: 16384 }, toolSupport: { fixture: false }, fetch: async () => { calls++; return Response.json({}) } })
