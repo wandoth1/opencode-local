@@ -261,7 +261,56 @@ function delta(chunk: Json): Json {
     ...(message.thinking ? { reasoning: message.thinking } : {}),
   }
 }
-function streamResponse(response: Response, request: Json, signal: AbortSignal, abort: AbortController) {
+interface AbortScope {
+  signal: AbortSignal
+  dispose: () => void
+}
+
+function composeAbortScope(local: AbortSignal, parent?: AbortSignal, timeoutMs?: number): AbortScope {
+  const controller = new AbortController()
+  const subscriptions: Array<() => void> = []
+  let disposed = false
+
+  const forward = (source: AbortSignal) => {
+    const onAbort = () => {
+      if (!controller.signal.aborted) controller.abort(source.reason)
+    }
+    if (source.aborted) onAbort()
+    else {
+      source.addEventListener("abort", onAbort, { once: true })
+      subscriptions.push(() => source.removeEventListener("abort", onAbort))
+    }
+  }
+
+  forward(local)
+  if (parent) forward(parent)
+
+  const timer = timeoutMs
+    ? setTimeout(() => {
+        if (!controller.signal.aborted) {
+          controller.abort(new DOMException("Local runtime request timed out at the configured deadline", "TimeoutError"))
+        }
+      }, timeoutMs)
+    : undefined
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      if (timer) clearTimeout(timer)
+      for (const unsubscribe of subscriptions) unsubscribe()
+    },
+  }
+}
+
+function streamResponse(
+  response: Response,
+  request: Json,
+  signal: AbortSignal,
+  abort: AbortController,
+  dispose: () => void,
+) {
   const iterator = readNdjson(response.body, signal)
   const encoder = new TextEncoder()
   const id = `chatcmpl-${crypto.randomUUID()}`
@@ -297,6 +346,7 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
             finished = true
             controller.close()
             await iterator.return(undefined)
+            dispose()
             return
           }
           if (Object.keys(content).length) return
@@ -305,6 +355,7 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
         finished = true
         abort.abort()
         await iterator.return(undefined).catch(() => undefined)
+        dispose()
         if (!cancelled) controller.error(error instanceof Error ? error : new Error("Ollama stream failed"))
       }
     },
@@ -312,6 +363,7 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
       cancelled = true
       abort.abort()
       await iterator.return(undefined).catch(() => undefined)
+      dispose()
     },
   })
   return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" } })
@@ -326,17 +378,19 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     if (!url.href.startsWith(base) || url.username || url.password || url.search || url.hash) return errorResponse(400, "Ollama transport refused a different endpoint")
-    const abort = new AbortController()
     const parent = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-    const signal = AbortSignal.any([
-      abort.signal, ...(parent ? [parent] : []), ...(timeout ? [AbortSignal.timeout(timeout)] : []),
-    ])
-    checkAbort(signal)
     let headers: Headers
     try { headers = ollamaHeaders(options) }
     catch { return errorResponse(400, "Invalid Ollama authentication headers") }
     headers.set("Content-Type", "application/json")
-    if (options.enabled === false || url.href !== `${base}chat/completions`) return fetcher(input, { ...init, headers, signal, redirect: "error" })
+    if (options.enabled === false || url.href !== `${base}chat/completions`) {
+      return fetcher(input, { ...init, headers, signal: parent, redirect: "error" })
+    }
+
+    const abort = new AbortController()
+    const scope = composeAbortScope(abort.signal, parent, timeout || undefined)
+    const signal = scope.signal
+    checkAbort(signal)
     let request: Json
     let native: ReturnType<typeof openAIToOllamaRequest>
     try {
@@ -348,7 +402,7 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
         throw daemonError("model does not support tools")
       }
     } catch (error) {
-      checkAbort(signal)
+      try { checkAbort(signal) } finally { scope.dispose() }
       return errorResponse(400, error instanceof Error ? error.message : "Invalid native request")
     }
     let response: Response
@@ -357,14 +411,18 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
     }
     try { response = await fetcher(`${host}/api/chat`, nativeInit) }
     catch {
-      checkAbort(signal)
+      try { checkAbort(signal) } finally { scope.dispose() }
       return errorResponse(502, "Ollama connection failed (redirects are not allowed)")
     }
     if (!response.ok) {
-      const error = await responseError(response, signal)
-      return errorResponse(response.status >= 400 ? response.status : 502, error.message)
+      try {
+        const error = await responseError(response, signal)
+        return errorResponse(response.status >= 400 ? response.status : 502, error.message)
+      } finally {
+        scope.dispose()
+      }
     }
-    if (native.stream) return streamResponse(response, request, signal, abort)
+    if (native.stream) return streamResponse(response, request, signal, abort, scope.dispose)
     try {
       const chunk = jsonObject(await boundedText(response.body, signal))
       const content = delta(chunk)
@@ -387,6 +445,8 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
     } catch (error) {
       checkAbort(signal)
       return errorResponse(502, error instanceof Error ? error.message : "Invalid Ollama completion")
+    } finally {
+      scope.dispose()
     }
   }
 }
