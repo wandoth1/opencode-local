@@ -65,8 +65,9 @@ export interface OllamaBenchmarkResult {
 
 export function normalizeOllamaHost(raw?: string): string {
   const source = raw?.trim() || "http://127.0.0.1:11434"
-  const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(source)
-  const input = source === "ollama.com" ? "https://ollama.com" : source
+  const connectableSource = /^:\d+$/.test(source) ? `127.0.0.1${source}` : source
+  const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(connectableSource)
+  const input = connectableSource === "ollama.com" ? "https://ollama.com" : connectableSource
   // Bare IPv6 addresses have no unambiguous port; use brackets for an explicit port.
   const bareIpv6 = !explicitScheme && !input.startsWith("[") && (input.match(/:/g)?.length ?? 0) > 1
   let url: URL
@@ -79,9 +80,9 @@ export function normalizeOllamaHost(raw?: string): string {
     throw new LocalRuntimeError("Ollama endpoints require HTTP(S) without embedded credentials, query or fragment")
   }
   // Host() defaults bare hosts to 11434, but explicit HTTP(S) URLs use 80/443.
-  if (!explicitScheme && source !== "ollama.com" && !url.port) {
+  if (!explicitScheme && connectableSource !== "ollama.com" && !url.port) {
     // URL normalizes an explicit :80 to an empty port; do not replace it.
-    const authority = source.split("/")[0]
+    const authority = connectableSource.split("/")[0]
     if (!/\]:\d+$/.test(authority) && !(authority.split(":").length === 2 && /:\d+$/.test(authority))) url.port = "11434"
   }
   if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1"
