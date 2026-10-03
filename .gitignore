@@ -32,3 +32,9 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Retired archive-based materialization must never return to the source tree.
+/scripts/local-hardening/
+/scripts/local-foundation-update/
+/scripts/local-foundation-patches/
+/scripts/local-foundation-wire.py

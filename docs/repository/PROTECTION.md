@@ -1,25 +1,11 @@
-# Repository protection
+# Activate protection for dev
 
-This is an unofficial OpenCode fork maintained by `wandoth1`. Changes to the local runtime belong on `feature/local-foundation` and are reviewed in PR #1 before merging into `dev`.
+The checked-in `.github/protect-dev.ruleset.json` is an importable proposal, not an active GitHub setting. The connector cannot perform repository-administration writes.
 
-## Owner action required
+After the two CI jobs pass, the owner should open **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, select the JSON and save it as **Active** for `dev`. Existing rulesets should be reviewed first to avoid duplicates.
 
-The checked-in `.github/protect-dev.ruleset.json` is a proposal, not an activated rule. Committing JSON does not configure GitHub branch protection. The available connector can edit source, but cannot perform the required repository administration operation.
+It blocks deletion/force pushes, requires a PR and resolved review conversations, and requires `local-runtime-linux` and `local-runtime-windows` on an up-to-date branch, with no bypass actors. Zero required approvals avoids locking out a sole maintainer who cannot approve their own PR. Increase to one once an independent writer/reviewer joins. `CODEOWNERS` alone does not enforce any of these requirements.
 
-After the two validation jobs have passed, use repository **Settings > Rules > Rulesets > New ruleset > Import a ruleset**, select the JSON, review the target `dev`, and save it with enforcement **Active**. Alternatively, an authenticated repository administrator can use:
+The only active workflow validates committed code read-only, on a PR or explicit manual run. There is no schedule, publishing, automatic source edit or automatic commit. Do not restore archived upstream or hardening workflows. For public contributions, require approval of outside contributors' workflow runs and never expose a self-hosted GPU runner to untrusted PR code.
 
-```bash
-gh api --method POST repos/wandoth1/opencode-local/rulesets --input .github/protect-dev.ruleset.json
-```
-
-Review existing rulesets first; do not repeatedly POST and create duplicates.
-
-The proposal blocks branch deletion and force pushes, requires a pull request, resolution of review conversations, and successful `local-runtime-linux` and `local-runtime-windows` checks on an up-to-date branch. It has no bypass actors. It requires zero approving reviews because a sole maintainer cannot approve their own PR; increase this to one when an independent collaborator with write access is available. The PR/check requirements still apply.
-
-`CODEOWNERS` assigns this fork to `@wandoth1`; it does not itself activate protection. Leave PR #1 in draft until re-audit and Windows/RTX 5070 testing are complete.
-
-## Actions
-
-The only active workflow is read-only local-runtime validation for pull requests or manual invocation. No cron, workflow_run chain, repository secret, publish step or automatic commit is used. It runs on GitHub-hosted Linux and Windows runners. Checkout does not persist credentials. Prior upstream workflows are retained outside `.github/workflows` and must not be restored without reviewing their targets and permissions.
-
-For public contributions, review GitHub's workflow-approval settings for outside collaborators. Do not use self-hosted GPU runners for untrusted pull requests.
+No application changes from PR #1 have been merged into `dev` by this repository setup.

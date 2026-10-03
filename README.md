@@ -1,59 +1,36 @@
 # OpenCode Local
 
-**An unofficial, experimental fork of OpenCode focused on Ollama integration and local-inference optimization for NVIDIA RTX 5070 hardware.**
+**Unofficial experimental fork of OpenCode, focused on Ollama compatibility and NVIDIA GeForce RTX 5070 local inference.**
 
 [Español](README.es.md) · [Development branch](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) · [Draft PR #1](https://github.com/wandoth1/opencode-local/pull/1)
 
-> **Attribution and independence:** This project is derived from [OpenCode](https://github.com/anomalyco/opencode), created by the OpenCode contributors. The fork-specific work is maintained by [wandoth1](https://github.com/wandoth1). OpenCode Local is not developed, supported, or endorsed by the OpenCode team and is not affiliated with it.
->
-> **Experimental status:** Runtime corrections and independent re-audit remain pending. The local-runtime branch is not production-ready. No performance improvement on a physical RTX 5070 has been demonstrated by this project yet.
+The original codebase and agent belong to the contributors to [anomalyco/opencode](https://github.com/anomalyco/opencode). [wandoth1](https://github.com/wandoth1) maintains this separate development effort; it is not developed, supported or endorsed by the original team. The [MIT license and copyright](LICENSE) are retained. FX is an architectural reference, not an integrated Zig runtime.
 
-## What this project is
+## Status
 
-OpenCode Local is a separate development effort on top of OpenCode's existing codebase, not an agent written from scratch and not an official OpenCode release. It retains the inherited product, tools, sessions, configuration, and provider infrastructure while exploring a more hardware-aware local runtime.
+Experimental source, not a production release or measured GPU acceleration. The physical re-audit of `0b4b6fc` found material issues despite green unit tests. Corrections and their limits are documented in [REAUDIT_FIXES.md](docs/local-foundation/REAUDIT_FIXES.md). Require checks for the exact current revision, independent review and repeated real-hardware tests before merge.
 
-The initial target is **Windows with an NVIDIA GeForce RTX 5070 and Ollama**. Work on other RTX 50-series cards or inference backends is a possible future extension, not a claim of tested support.
+`dev` is the protected default branch; `feature/local-foundation` contains the unmerged local work in PR #1. Imported upstream baseline: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. This is an independent import; "fork" describes provenance, not necessarily GitHub fork-network membership. Other RTX 50-series GPUs are not claimed tested.
 
-The development objectives are:
+## Run reviewed source
 
-- More reliable Ollama discovery, model metadata, native transport, streaming, and tool calling.
-- Context and KV-cache budgeting informed by available VRAM, with diagnostics that distinguish estimates from measurements.
-- Reproducible benchmarks before making claims about speed, memory use, or CPU offload.
-
-[vercel-labs/fx](https://github.com/vercel-labs/fx) is an architectural reference for separating the agent, provider, and transport. This does not mean that FX's Zig runtime is integrated into this fork.
-
-## Where development happens
-
-| Branch | Purpose |
-| --- | --- |
-| [`dev`](https://github.com/wandoth1/opencode-local/tree/dev) | Default landing branch: imported OpenCode baseline, fork presentation, and repository automation housekeeping. It does not contain the unmerged local-runtime implementation. |
-| [`feature/local-foundation`](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) | Experimental Ollama, hardware diagnostics, and context-management work. Review and corrections take place here. |
-
-The imported upstream baseline is `anomalyco/opencode@b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. It is a historical starting point, not a claim of synchronization with the latest upstream revision.
-
-The repository was imported as a separate copy. Here, **fork** describes its code lineage; it does not imply that GitHub displays it as a fork in the upstream repository network. PR #1 belongs to `wandoth1/opencode-local`, not to the upstream repository.
-
-## Status and installation
-
-The local-runtime changes are under development in [draft PR #1](https://github.com/wandoth1/opencode-local/pull/1), not merged into `dev`. Earlier audit findings and failed hardening attempts must not be mistaken for completed fixes or successful validation of the current HEAD.
-
-The inherited scheduled maintenance jobs and temporary hardening jobs that were paused must remain paused. Their archived YAML files are kept under `.github/disabled-workflows/` on the applicable branch. This README change does not restart them or launch a new build.
-
-To inspect the experimental source:
+Use Node 22+ and Bun 1.3.14 in a trusted checkout; start Ollama separately.
 
 ```bash
 git clone --single-branch --branch feature/local-foundation https://github.com/wandoth1/opencode-local.git
 cd opencode-local
+bun install --frozen-lockfile --filter './' --filter './packages/opencode'
+node scripts/opencode-local.mjs local doctor --json
 ```
 
-**The official OpenCode installer, the `opencode-ai` npm package, and downloads from `anomalyco/opencode` install upstream OpenCode, not this experimental branch.** Do not treat upstream packages, releases, version badges, or CI badges as evidence that this fork has been built or validated.
+**Launch with Node as shown, not direct `bun run src/index.ts`: the launcher prevents a project's `.env` from being auto-loaded into the agent.** For another working directory use the launcher's absolute path. See [USAGE.md](docs/local-foundation/USAGE.md) for model selection, credentials, timeouts and benchmarks.
 
-Branch-specific technical documents are available in [docs/local-foundation](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation/docs/local-foundation). They describe implementation intent; current source, audit findings, and checks for the exact commit take precedence over older status claims.
+The default agent context is 32K, capped by the model maximum; transient VRAM no longer forces a 4K context. Memory estimates are advisory and unsupported architectures are reported unknown. This does not promise every model or workload will fit in GPU memory.
 
-## Upstream attribution and license
+Official OpenCode installers, npm `opencode-ai` and upstream releases install the original, not this branch. The root `install` script refuses to download those binaries. Historical translated upstream documents may still describe the original; use these English/Spanish pages for this fork.
 
-The original [MIT license and copyright notice](LICENSE) are retained unchanged. OpenCode names inside source packages, commands, configuration keys, historical documents, and inherited assets identify the upstream software or preserve compatibility; they do not imply official endorsement of this fork.
+## Collaboration and safety
 
-The [original upstream README at the imported baseline](https://github.com/anomalyco/opencode/blob/b155b15694dbcc6768f11d2f25cc2bdd1f738ab4/README.md) remains the reference for the original project. Other inherited README translations may still describe upstream OpenCode; the English and Spanish READMEs in this repository describe OpenCode Local.
+Use this repository's issues and PRs for fork-specific changes. The active Linux/Windows validation is read-only, with no schedule, automatic commits or deployment. The suite includes a bounded 305-second streaming regression, not a recurring job. Retired upstream maintenance stays archived. No merge or release is automatic.
 
-Please discuss fork-specific issues and changes in [wandoth1/opencode-local](https://github.com/wandoth1/opencode-local/issues), without assuming that the upstream maintainers support this branch.
+Keep credentials in trusted user configuration or documented shell variables. Tools/plugins retain user privileges; this is not a sandbox for arbitrary repositories. No performance claim should be made without equivalent model, quantization, context, prompt and hardware measurements.
