@@ -75,7 +75,10 @@ export async function boundedText(body: ReadableStream<Uint8Array> | null, signa
   } finally {
     signal?.removeEventListener("abort", abort)
     cancelReader(reader)
-    reader.releaseLock()
+    try { reader.releaseLock() } catch {
+      // Some Bun/Windows streams keep a read pending briefly after cancellation.
+      // Do not replace the original timeout/cancellation with a releaseLock error.
+    }
   }
 }
 export async function* readNdjson(body: ReadableStream<Uint8Array> | null, signal?: AbortSignal | null): AsyncGenerator<Json> {
@@ -108,6 +111,9 @@ export async function* readNdjson(body: ReadableStream<Uint8Array> | null, signa
   } finally {
     signal?.removeEventListener("abort", abort)
     cancelReader(reader)
-    reader.releaseLock()
+    try { reader.releaseLock() } catch {
+      // Some Bun/Windows streams keep a read pending briefly after cancellation.
+      // Do not replace the original timeout/cancellation with a releaseLock error.
+    }
   }
 }
