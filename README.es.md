@@ -25,7 +25,7 @@ node scripts/opencode-local.mjs local doctor --json
 
 **Arranca con Node como en el ejemplo, no directamente con `bun run src/index.ts`: el lanzador impide que el `.env` del proyecto se cargue automáticamente en el agente.** Desde otro directorio utiliza la ruta absoluta del lanzador. Consulta [USAGE.md](docs/local-foundation/USAGE.md) para seleccionar modelos, configurar credenciales, tiempos de espera y benchmarks.
 
-El contexto predeterminado es 16K, limitado por el máximo del modelo. La VRAM libre momentánea ya no lo reduce automáticamente a 4K. Las cifras de memoria son orientativas; las arquitecturas no cubiertas se presentan como desconocidas. No se garantiza que todos los modelos o tareas quepan en GPU.
+El contexto predeterminado es 32K, limitado por el máximo del modelo. La VRAM libre momentánea ya no lo reduce automáticamente a 4K. Las cifras de memoria son orientativas; las arquitecturas no cubiertas se presentan como desconocidas. No se garantiza que todos los modelos o tareas quepan en GPU.
 
 El instalador oficial, npm `opencode-ai` y las releases de OpenCode instalan el original, no esta rama. El script `install` de la raíz ya no descarga esos binarios. Algunas traducciones históricas siguen describiendo el original: utiliza estas portadas en español e inglés para este fork.
 
