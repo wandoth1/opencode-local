@@ -32,13 +32,11 @@ async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal
     return result
   } catch {
     checkAbort(signal)
-    // A custom fetch/reader may reject with a URL, key or server error. Do not forward it.
     throw new Error("Local runtime response stream failed")
   }
 }
 
-/** Cancellation can wait for the other branch of a tee or an uncooperative source.
- * Initiate it, handle its rejection, and release our lock without awaiting that promise. */
+/** A source or the other side of a tee can delay cancellation indefinitely. */
 function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>) {
   void reader.cancel().catch(() => undefined)
 }
@@ -102,14 +100,19 @@ export async function* readNdjson(
       }
       let newline: number
       while ((newline = pending.indexOf("\n")) >= 0) {
+        // A cancellation may occur while the generator is suspended at a yield,
+        // with additional frames already buffered from the same network chunk.
+        checkAbort(signal)
         const line = pending.slice(0, newline)
         pending = pending.slice(newline + 1)
         if (Buffer.byteLength(line, "utf8") > MAX_FRAME_BYTES) throw new Error("Ollama frame exceeds its size limit")
         if (line.trim()) yield jsonObject(line)
       }
+      checkAbort(signal)
       if (Buffer.byteLength(pending, "utf8") > MAX_FRAME_BYTES) throw new Error("Ollama frame exceeds its size limit")
       if (done) break
     }
+    checkAbort(signal)
     if (pending.trim()) yield jsonObject(pending)
   } finally {
     signal?.removeEventListener("abort", abort)
