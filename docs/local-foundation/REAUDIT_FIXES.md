@@ -10,7 +10,7 @@ The supplied ZIP contained the report and logs, not the original `repro`, `harne
 
 | Finding | Implementation |
 | --- | --- |
-| B1 unusable 4K default | Default 16K capped at native maximum. Free VRAM is advisory, never silently shrinks the agent window. Explicit/Modelfile requests preserved. Unit tests cover loaded and empty 12 GiB GPU states; actual CLI test includes system/tools and file-read round trip. |
+| B1 unusable 4K default | Default 32K capped at native maximum. Free VRAM is advisory and never silently shrinks the agent window. Explicit/Modelfile requests are preserved. A second consecutive Ollama overflow after compaction stops with an actionable ContextOverflowError instead of compacting forever. |
 | H1 error information lost | Bounded canonical classification preserves core-recognizable context overflow, missing models, memory, auth and tool incompatibility without exposing arbitrary daemon bodies. Tool-incompatible models fail before native generation. |
 | H2 hidden 300s deadline | Removed implicit generation/benchmark totals, preserved optional explicit totals and core timeout controls, TimeoutError distinct from AbortError. Real HTTP/wall-time regression runs for 305 seconds. |
 | H3 disable/env diversion | Disable removes and blacklists Ollama. Generic OLLAMA_HOST cannot move an environment key. Node source launcher disables Bun .env loading before imports; raw direct Bun invocation is not the supported secure launch path. |
@@ -19,7 +19,7 @@ The supplied ZIP contained the report and logs, not the original `repro`, `harne
 | M3 misleading KV confidence | Unknown for hybrid/sliding-window/missing-KV metadata; conventional estimate at most medium confidence. No claim of calibration. |
 | M4 failed show downgrade | Failed introspection excludes model and produces warning instead of fabricating capabilities. |
 | M5 user daemon policy | No default keep_alive override; Modelfile num_ctx treated as requested allocation, separate from known model maximum. |
-| M6 manual 16K cap | Explicitly selected models use live /api/show metadata even without automatic listing. |
+| M6 manual 32K cap | Explicitly selected models use live /api/show metadata even without automatic listing. |
 | M7 false prefill speed | Missing cache counter means unknown prefill throughput; no invented zero-cache assumption. |
 | M8 conflicting full tool calls | Complete differing objects on same identity rejected; recognized names cannot silently change to another function. |
 | L1-L7 | Version/terminal controls sanitized, CUDA UMD banner recognized, safe actionable CLI errors, explicit benchmark selection, global-host env-key binding, explicit size-limit message, linear fragment accumulation. |
@@ -37,6 +37,6 @@ Before merge, repeat real E5 with the supported Node launcher and no context ove
 
 ## Limits not solved by this patch
 
-16K is a practical default, not a tokenizer-based admission guarantee for arbitrary tools/plugins/history. Deliberately configured smaller windows can still be unusable and large allocations can offload/fail. KV is not calibrated against actual /api/ps deltas; unknown architectures remain unknown. Client environment variables do not prove daemon settings. No multi-GPU placement optimizer, llama.cpp backend, continuous VRAM manager, fresh physical benchmark, packaged binary or speedup claim is delivered.
+32K is a practical default, not a tokenizer-based admission guarantee for arbitrary tools/plugins/history. Deliberately configured smaller windows can still be unusable and large allocations can offload/fail. KV is not calibrated against actual /api/ps deltas; unknown architectures remain unknown. Client environment variables do not prove daemon settings. No multi-GPU placement optimizer, llama.cpp backend, continuous VRAM manager, fresh physical benchmark, packaged binary or speedup claim is delivered.
 
 The agent is not a sandbox. External plugins and other inherited provider configuration can execute or send data with user privileges. A plugin cannot sanitize environment variables already loaded by an unsafe parent; use the Node launcher from a trusted checkout with trusted executable/configuration.
