@@ -13,8 +13,12 @@ afterAll(async () => {
   const { AppRuntime } = await import("../src/effect/app-runtime")
   await AppRuntime.dispose()
 
+  // Bun on Windows can also report a still-open handle as EFAULT from rm().
   const busy = (error: unknown) =>
-    typeof error === "object" && error !== null && "code" in error && error.code === "EBUSY"
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "EBUSY" || (process.platform === "win32" && error.code === "EFAULT"))
   const rm = async (left: number): Promise<void> => {
     Bun.gc(true)
     await sleep(100)

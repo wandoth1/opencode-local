@@ -52,4 +52,6 @@ The third physical re-audit examined `b5f54f7aa2bdf165efb04c3106a560d5dd995abb` 
 | `OLLAMA_HOST=:11434/v1` rejected | Empty-host bind notation is accepted with a path. |
 | Explicit deadline retried five times | The expired-deadline message no longer matches the core's retryable-message patterns, so a configured `generationTimeoutMs` fails once instead of repeating the whole generation with backoff. The error is still a `TimeoutError`. |
 
-Not changed: unclassified daemon errors still surface as a bare HTTP status; `run` reports an unknown server error when an `ollama/` model is requested while the provider is disabled and exits non-zero after a recovered overflow (both upstream behaviour for any provider); the context default remains a constant rather than a measurement of the actual prompt.
+A later commit also maps four more daemon failures to canonical messages (thinking unsupported, image input rejected, runner stopped, invalid option); anything else still surfaces as a bare HTTP status. The shared test preload now retries its Windows teardown on `EFAULT` as it already did on `EBUSY`; on the owner's machine that cleanup failed intermittently and turned a fully passing provider run into exit 1.
+
+Not changed: `run` reports an unknown server error when an `ollama/` model is requested while the provider is disabled and exits non-zero after a recovered overflow (both upstream behaviour for any provider); the context default remains a constant rather than a measurement of the actual prompt.
