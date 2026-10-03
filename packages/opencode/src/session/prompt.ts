@@ -1083,6 +1083,7 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
+        let consecutiveOllamaOverflows = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1318,13 +1319,33 @@ const layer = Layer.effect(
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              const overflow = !handle.message.finish
+              if (model.providerID === "ollama" && overflow) {
+                consecutiveOllamaOverflows++
+                if (consecutiveOllamaOverflows >= 2) {
+                  const error = new SessionV1.ContextOverflowError({
+                    message:
+                      `Ollama still exceeds the configured context window (${model.limit.context} tokens) after overflow compaction. Increase provider.ollama.options.numCtx / OPENCODE_OLLAMA_NUM_CTX, reduce enabled skills/tools, or choose a model with a larger context window.`,
+                  }).toObject()
+                  handle.message.error = error
+                  handle.message.finish = "error"
+                  handle.message.time.completed ??= Date.now()
+                  yield* sessions.updateMessage(handle.message)
+                  yield* events.publish(Session.Event.Error, { sessionID, error })
+                  return "break" as const
+                }
+              } else {
+                consecutiveOllamaOverflows = 0
+              }
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
                 model: lastUser.model,
                 auto: true,
-                overflow: !handle.message.finish,
+                overflow,
               })
+            } else {
+              consecutiveOllamaOverflows = 0
             }
             return "continue" as const
           }).pipe(
