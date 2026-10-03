@@ -65,7 +65,8 @@ export interface OllamaBenchmarkResult {
 
 export function normalizeOllamaHost(raw?: string): string {
   const source = raw?.trim() || "http://127.0.0.1:11434"
-  const connectableSource = /^:\d+$/.test(source) ? `127.0.0.1${source}` : source
+  // Ollama accepts an empty bind host, with or without a path (":11434", ":11434/v1").
+  const connectableSource = /^:\d+(?:\/|$)/.test(source) ? `127.0.0.1${source}` : source
   const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(connectableSource)
   const input = connectableSource === "ollama.com" ? "https://ollama.com" : connectableSource
   // Bare IPv6 addresses have no unambiguous port; use brackets for an explicit port.

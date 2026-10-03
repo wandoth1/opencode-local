@@ -4,7 +4,9 @@ import { recommendContext, estimateKvBytesPerToken } from "@/local/context-budge
 import { OllamaClient, normalizeOllamaHost } from "@/local/ollama/client"
 import { configureOllama, discoverOllama, resolveOllamaSettings } from "@/local/ollama/integration"
 import { createOllamaNativeFetch, type FetchLike } from "@/local/ollama/transport"
-import { checkAbort } from "@/local/ollama/io"
+import { checkAbort, GENERATION_DEADLINE_MESSAGE } from "@/local/ollama/io"
+import { SessionRetry } from "@/session/retry"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { getDoctorReport } from "@/local/doctor"
 import { parseCudaVersion } from "@/local/hardware"
 import { isContextOverflow } from "../../../llm/src/provider-error"
@@ -80,7 +82,7 @@ test("M3: hybrid, sliding-window and missing-KV metadata cannot claim a conventi
 })
 test("M1: bare hosts use 11434 and unspecified bind addresses become connectable", () => {
   for (const [input, expected] of [
-    ["127.0.0.1", host], [":11434", host], ["myserver", "http://myserver:11434"],
+    ["127.0.0.1", host], [":11434", host], [":11434/v1", host], ["myserver", "http://myserver:11434"],
     ["0.0.0.0:11434", host], ["[::]:11434", "http://[::1]:11434"],
     ["::1", "http://[::1]:11434"], ["[::1]", "http://[::1]:11434"],
     ["http://myserver", "http://myserver"], ["https://myserver", "https://myserver"],
@@ -168,6 +170,18 @@ test("H2: TimeoutError is distinct from user cancellation and never echoes the a
   const cancel = new AbortController()
   cancel.abort("private-reason")
   expect(() => checkAbort(cancel.signal)).toThrow("aborted")
+})
+test("H2: an expired explicit deadline is not retried by the core's message classifier", () => {
+  const timeout = new AbortController()
+  timeout.abort(new DOMException("deadline", "TimeoutError"))
+  try { checkAbort(timeout.signal); throw new Error("did not throw") }
+  catch (error) {
+    expect((error as Error).message).toBe(GENERATION_DEADLINE_MESSAGE)
+    // The session wraps this DOMException as an Unknown error and retries by message.
+    expect(SessionRetry.retryable(new NamedError.Unknown({ message: (error as Error).message }).toObject(), "ollama")).toBeUndefined()
+  }
+  // Guard the premise: the previous wording was retried five times with backoff.
+  expect(SessionRetry.retryable(new NamedError.Unknown({ message: "Local runtime request timed out at the configured deadline" }).toObject(), "ollama")).toBeDefined()
 })
 test("H2: explicit deadline survives integration and standard core timeout controls are preserved", async () => withEnv({}, async () => {
   const cfg: LocalConfig = config({ generationTimeoutMs: 200, timeout: false, chunkTimeout: 60000, headerTimeout: 90000 })

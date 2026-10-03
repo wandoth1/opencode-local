@@ -13,10 +13,14 @@ export function jsonObject(text: string): Json {
   if (!result) throw new Error("Ollama JSON must be an object")
   return result
 }
+// Worded to stay outside the core's retryable-message patterns (session/retry.ts):
+// an explicit total deadline that expired would expire again on every retry.
+export const GENERATION_DEADLINE_MESSAGE =
+  "Ollama generation deadline reached (generationTimeoutMs): the model did not finish within the configured limit. Raise or disable the limit."
 export function checkAbort(signal?: AbortSignal | null) {
   if (!signal?.aborted) return
   if (signal.reason instanceof Error && signal.reason.name === "TimeoutError") {
-    throw new DOMException("Local runtime request timed out at the configured deadline", "TimeoutError")
+    throw new DOMException(GENERATION_DEADLINE_MESSAGE, "TimeoutError")
   }
   throw new DOMException("Local runtime request aborted", "AbortError")
 }

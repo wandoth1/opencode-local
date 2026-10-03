@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer"
 import { normalizeOllamaHost, ollamaHeaders } from "./client"
-import { boundedText, checkAbort, jsonObject, object, readNdjson, MAX_FRAME_BYTES, type Json } from "./io"
+import { boundedText, checkAbort, jsonObject, object, readNdjson, GENERATION_DEADLINE_MESSAGE, MAX_FRAME_BYTES, type Json } from "./io"
 import { daemonError, responseError } from "./errors"
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
@@ -288,7 +288,7 @@ function composeAbortScope(local: AbortSignal, parent?: AbortSignal, timeoutMs?:
   const timer = timeoutMs
     ? setTimeout(() => {
         if (!controller.signal.aborted) {
-          controller.abort(new DOMException("Local runtime request timed out at the configured deadline", "TimeoutError"))
+          controller.abort(new DOMException(GENERATION_DEADLINE_MESSAGE, "TimeoutError"))
         }
       }, timeoutMs)
     : undefined
