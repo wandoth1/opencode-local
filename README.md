@@ -25,7 +25,7 @@ node scripts/opencode-local.mjs local doctor --json
 
 **Launch with Node as shown, not direct `bun run src/index.ts`: the launcher prevents a project's `.env` from being auto-loaded into the agent.** For another working directory use the launcher's absolute path. See [USAGE.md](docs/local-foundation/USAGE.md) for model selection, credentials, timeouts and benchmarks.
 
-The default agent context is 16K, capped by the model maximum; transient VRAM no longer forces a 4K context. Memory estimates are advisory and unsupported architectures are reported unknown. This does not promise every model or workload will fit in GPU memory.
+The default agent context is 32K, capped by the model maximum; transient VRAM no longer forces a 4K context. Memory estimates are advisory and unsupported architectures are reported unknown. This does not promise every model or workload will fit in GPU memory.
 
 Official OpenCode installers, npm `opencode-ai` and upstream releases install the original, not this branch. The root `install` script refuses to download those binaries. Historical translated upstream documents may still describe the original; use these English/Spanish pages for this fork.
 
