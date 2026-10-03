@@ -26,9 +26,9 @@ Both installation filters are intentional: root tooling/types plus the CLI agent
 
 ## Context policy
 
-Without an explicit allocation or Modelfile `num_ctx`, the agent defaults to **16,384 tokens**, capped at the known model maximum. Transient free VRAM does not reduce this to 4K. Explicit small allocations and small native maxima are preserved, with warnings; they may be insufficient even for system instructions and tool schemas.
+Without an explicit allocation or Modelfile `num_ctx`, the agent defaults to **32,768 tokens**, capped at the known model maximum. Transient free VRAM does not reduce this to 4K. Explicit small allocations and small native maxima are preserved, with warnings; they may be insufficient even for system instructions and tool schemas.
 
-Precedence: CLI `--num-ctx` for doctor, provider `numCtx`, `OPENCODE_OLLAMA_NUM_CTX`, manual model `limit.context`, Modelfile `num_ctx`, then the 16K default. Persisted `limit` objects require both `context` and `output`. The current implementation does not tokenize every complete agent request or guarantee that 16K accommodates arbitrary tools, plugins or conversation history. Overflow is returned in a canonical form recognized by the core; raise context within the model maximum or reduce workload when initial system/tools already overflow.
+Precedence: CLI `--num-ctx` for doctor, provider `numCtx`, `OPENCODE_OLLAMA_NUM_CTX`, manual model `limit.context`, Modelfile `num_ctx`, then the 32K default. Persisted `limit` objects require both `context` and `output`. The current implementation does not tokenize every complete agent request or guarantee that 32K accommodates arbitrary tools, plugins or conversation history. Overflow is returned in a canonical form recognized by the core; raise context within the model maximum or reduce workload when initial system/tools already overflow.
 
 VRAM/KV figures are advisory. Unknown/hybrid/sliding-window architectures produce unknown KV values and low confidence, not a conventional formula labeled high confidence. Conventional estimates have at most medium confidence. `OPENCODE_OLLAMA_KV_BYTES_PER_ELEMENT` changes an explicit estimate only; a client-side `OLLAMA_KV_CACHE_TYPE` is not evidence of how an already-running daemon was configured. No runtime calibration or full-GPU residency guarantee is claimed.
 
