@@ -1,59 +1,52 @@
 # OpenCode Local
 
-**An unofficial, experimental fork of OpenCode focused on Ollama integration and local-inference optimization for NVIDIA RTX 5070 hardware.**
+**Unofficial, experimental OpenCode fork focused on Ollama compatibility and local inference on NVIDIA GeForce RTX 5070 hardware.**
 
 [Español](README.es.md) · [Development branch](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) · [Draft PR #1](https://github.com/wandoth1/opencode-local/pull/1)
 
-> **Attribution and independence:** This project is derived from [OpenCode](https://github.com/anomalyco/opencode), created by the OpenCode contributors. The fork-specific work is maintained by [wandoth1](https://github.com/wandoth1). OpenCode Local is not developed, supported, or endorsed by the OpenCode team and is not affiliated with it.
+> OpenCode's original codebase and agent were created by the contributors to [anomalyco/opencode](https://github.com/anomalyco/opencode). This fork is maintained independently by [wandoth1](https://github.com/wandoth1); it is not developed, supported or endorsed by the OpenCode team.
 >
-> **Experimental status:** Runtime corrections and independent re-audit remain pending. The local-runtime branch is not production-ready. No performance improvement on a physical RTX 5070 has been demonstrated by this project yet.
+> Experimental: this is a source-level local-runtime milestone, not a production release or a demonstrated RTX 5070 speedup. Independent re-audit and physical GPU testing remain required.
 
-## What this project is
+## Purpose
 
-OpenCode Local is a separate development effort on top of OpenCode's existing codebase, not an agent written from scratch and not an official OpenCode release. It retains the inherited product, tools, sessions, configuration, and provider infrastructure while exploring a more hardware-aware local runtime.
+Keep OpenCode's existing sessions, tools, configuration, UI and provider infrastructure while developing a more reliable local Ollama integration. The initial target is Windows with an RTX 5070. Other RTX 50-series hardware is not presented as already tested.
 
-The initial target is **Windows with an NVIDIA GeForce RTX 5070 and Ollama**. Work on other RTX 50-series cards or inference backends is a possible future extension, not a claim of tested support.
+Work on `feature/local-foundation` includes native Ollama discovery and chat transport, incremental text/reasoning, tool-call validation, NVIDIA diagnostics, context/KV-cache estimates, and a reproducible doctor/benchmark command. [vercel-labs/fx](https://github.com/vercel-labs/fx) is an architectural reference for separating agent, provider and transport; its Zig runtime is not integrated here.
 
-The development objectives are:
+## Branches and status
 
-- More reliable Ollama discovery, model metadata, native transport, streaming, and tool calling.
-- Context and KV-cache budgeting informed by available VRAM, with diagnostics that distinguish estimates from measurements.
-- Reproducible benchmarks before making claims about speed, memory use, or CPU offload.
-
-[vercel-labs/fx](https://github.com/vercel-labs/fx) is an architectural reference for separating the agent, provider, and transport. This does not mean that FX's Zig runtime is integrated into this fork.
-
-## Where development happens
-
-| Branch | Purpose |
+| Branch | Role |
 | --- | --- |
-| [`dev`](https://github.com/wandoth1/opencode-local/tree/dev) | Default landing branch: imported OpenCode baseline, fork presentation, and repository automation housekeeping. It does not contain the unmerged local-runtime implementation. |
-| [`feature/local-foundation`](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) | Experimental Ollama, hardware diagnostics, and context-management work. Review and corrections take place here. |
+| `dev` | Default branch: imported application baseline, fork presentation and repository housekeeping. Local-runtime changes have not been merged. |
+| `feature/local-foundation` | Experimental implementation and audit corrections proposed in this repository's draft PR #1. |
 
-The imported upstream baseline is `anomalyco/opencode@b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. It is a historical starting point, not a claim of synchronization with the latest upstream revision.
+Imported baseline: `anomalyco/opencode@b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. This is a historical reference, not a claim to track the latest upstream commit. The repository was imported independently; "fork" describes its code provenance rather than membership in GitHub's fork network.
 
-The repository was imported as a separate copy. Here, **fork** describes its code lineage; it does not imply that GitHub displays it as a fork in the upstream repository network. PR #1 belongs to `wandoth1/opencode-local`, not to the upstream repository.
+The first static audit found material defects. Its corrections are now represented by direct, reviewable source changes, not bootstrap archives. Review the [audit ledger](https://github.com/wandoth1/opencode-local/blob/feature/local-foundation/docs/local-foundation/AUDIT.md), current diff and checks for the exact revision; older completion claims and old green runs are not evidence for a new HEAD.
 
-## Status and installation
+Inherited scheduled maintenance and self-modifying hardening jobs remain archived. The replacement validation workflow checks Linux and Windows on PR changes or manual invocation, with read-only repository permissions, no schedule, no automatic commits and no deployment.
 
-The local-runtime changes are under development in [draft PR #1](https://github.com/wandoth1/opencode-local/pull/1), not merged into `dev`. Earlier audit findings and failed hardening attempts must not be mistaken for completed fixes or successful validation of the current HEAD.
-
-The inherited scheduled maintenance jobs and temporary hardening jobs that were paused must remain paused. Their archived YAML files are kept under `.github/disabled-workflows/` on the applicable branch. This README change does not restart them or launch a new build.
-
-To inspect the experimental source:
+## Inspect and run the experimental source
 
 ```bash
 git clone --single-branch --branch feature/local-foundation https://github.com/wandoth1/opencode-local.git
 cd opencode-local
+bun install --frozen-lockfile
+cd packages/opencode
+bun run --conditions=browser src/index.ts local doctor --json
 ```
 
-**The official OpenCode installer, the `opencode-ai` npm package, and downloads from `anomalyco/opencode` install upstream OpenCode, not this experimental branch.** Do not treat upstream packages, releases, version badges, or CI badges as evidence that this fork has been built or validated.
+Use the pinned Bun version from `package.json` and start Ollama separately. See the [usage guide](https://github.com/wandoth1/opencode-local/blob/feature/local-foundation/docs/local-foundation/USAGE.md) before benchmarking. GPU memory values are estimates; a unit test or mock server is not a real-model performance test.
 
-Branch-specific technical documents are available in [docs/local-foundation](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation/docs/local-foundation). They describe implementation intent; current source, audit findings, and checks for the exact commit take precedence over older status claims.
+**Official OpenCode installers, the npm package `opencode-ai`, and upstream releases install the original application, not this branch.** No fork binary release is promised by this README.
 
-## Upstream attribution and license
+## Collaboration and safety
 
-The original [MIT license and copyright notice](LICENSE) are retained unchanged. OpenCode names inside source packages, commands, configuration keys, historical documents, and inherited assets identify the upstream software or preserve compatibility; they do not imply official endorsement of this fork.
+Contribute through [this repository's issues and pull requests](https://github.com/wandoth1/opencode-local/issues). Keep changes on reviewable branches and never re-enable retired workflows without owner approval. Repository rules must be activated in GitHub Settings; a ruleset JSON file alone does not protect a branch.
 
-The [original upstream README at the imported baseline](https://github.com/anomalyco/opencode/blob/b155b15694dbcc6768f11d2f25cc2bdd1f738ab4/README.md) remains the reference for the original project. Other inherited README translations may still describe upstream OpenCode; the English and Spanish READMEs in this repository describe OpenCode Local.
+Place remote Ollama endpoints and credentials in trusted user configuration or the documented environment variables, not a shared project config. This fork is still a coding agent that can execute tools/plugins: it is not a sandbox for arbitrary repositories.
 
-Please discuss fork-specific issues and changes in [wandoth1/opencode-local](https://github.com/wandoth1/opencode-local/issues), without assuming that the upstream maintainers support this branch.
+## Attribution and license
+
+The original [MIT license and copyright notice](LICENSE) are preserved. OpenCode references in inherited packages, commands, historical documents and assets retain attribution or compatibility; they are not an endorsement of this fork. Other inherited README translations may still describe upstream OpenCode; these English and Spanish pages describe OpenCode Local.
