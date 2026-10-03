@@ -185,6 +185,75 @@ test("CLI: disabled local provider never sends a merged global key to a project 
   }
 }, 60000)
 
+const overflow = () => Response.json(
+  { error: "request (40000 tokens) exceeds the available context size (32768 tokens), try increasing it" },
+  { status: 400 },
+)
+const frames = (message: Record<string, unknown>) => new Response([
+  JSON.stringify({ message, done: false }),
+  JSON.stringify({ message: { role: "assistant", content: "" }, done: true, done_reason: "stop", eval_count: 2, prompt_eval_count: 50 }),
+  "",
+].join("\n"), { headers: { "Content-Type": "application/x-ndjson" } })
+type ChatBody = { tools?: Array<{ function: { name: string } }> }
+
+// The guard lives in the upstream session loop (src/session/prompt.ts), so the
+// counter's unit test cannot notice it being moved or dropped. Agent turns carry
+// tool schemas; title and compaction requests do not.
+test("CLI: repeated Ollama overflow stops after one compaction instead of looping", async () => {
+  await sandbox(async ({ writeGlobal, command }) => {
+    const seen = { agent: 0, other: 0 }
+    const good = daemon(async (request) => {
+      const body = await request.json() as ChatBody
+      if (!body.tools?.length) { seen.other++; return frames({ role: "assistant", content: "summary" }) }
+      seen.agent++
+      return overflow()
+    })
+    try {
+      await writeGlobal({ model: "ollama/fixture", small_model: "ollama/fixture", provider: { ollama: { options: { host: good.host } } } })
+      const result = await command(["run", "--model", "ollama/fixture", "Reply OK"])
+      expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("after overflow compaction")
+      expect(result.stderr).toContain("numCtx")
+      expect(result.stderr).toContain("skills/tools")
+      // First overflow, one compaction, second overflow, stop. Never a third agent turn.
+      expect(seen.agent).toBe(2)
+      // Title plus exactly one compaction.
+      expect(seen.other).toBe(2)
+    } finally {
+      good.server.stop(true)
+    }
+  })
+}, 45000)
+
+test("CLI: a successful turn resets the Ollama overflow counter", async () => {
+  await sandbox(async ({ project, writeGlobal, command }) => {
+    const proof = path.join(project, "proof.txt")
+    let agent = 0
+    const good = daemon(async (request) => {
+      const body = await request.json() as ChatBody
+      if (!body.tools?.length) return frames({ role: "assistant", content: "summary" })
+      agent++
+      // overflow, real tool call, overflow, answer: only reachable when turn 2 clears the counter.
+      if (agent === 1 || agent === 3) return overflow()
+      if (agent === 2) return frames({ role: "assistant", content: "", tool_calls: [{ id: "read-fixture", function: {
+        index: 0, name: "read", arguments: { filePath: proof },
+      } }] })
+      return frames({ role: "assistant", content: "RECOVERED_AFTER_SECOND_OVERFLOW" })
+    })
+    try {
+      await writeGlobal({ model: "ollama/fixture", small_model: "ollama/fixture", provider: { ollama: { options: { host: good.host } } } })
+      await fs.writeFile(proof, "fixture\n")
+      const result = await command(["run", "--model", "ollama/fixture", `Read ${JSON.stringify(proof)} with the read tool, then reply.`])
+      // Upstream `run` exits non-zero after any reported overflow, even a recovered one.
+      expect(result.stdout).toContain("RECOVERED_AFTER_SECOND_OVERFLOW")
+      expect(result.stderr).not.toContain("after overflow compaction")
+      expect(agent).toBe(4)
+    } finally {
+      good.server.stop(true)
+    }
+  })
+}, 45000)
+
 test("CLI: actual agent reads the selected project's file despite a stale inherited PWD", async () => {
   await sandbox(async ({ project, writeGlobal, command }) => {
     const proof = path.join(project, "proof.txt")
