@@ -80,7 +80,7 @@ test("M3: hybrid, sliding-window and missing-KV metadata cannot claim a conventi
 })
 test("M1: bare hosts use 11434 and unspecified bind addresses become connectable", () => {
   for (const [input, expected] of [
-    ["127.0.0.1", host], ["myserver", "http://myserver:11434"],
+    ["127.0.0.1", host], [":11434", host], ["myserver", "http://myserver:11434"],
     ["0.0.0.0:11434", host], ["[::]:11434", "http://[::1]:11434"],
     ["::1", "http://[::1]:11434"], ["[::1]", "http://[::1]:11434"],
     ["http://myserver", "http://myserver"], ["https://myserver", "https://myserver"],
