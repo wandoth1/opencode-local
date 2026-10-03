@@ -1,129 +1,59 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">El agente de programación con IA de código abierto.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# OpenCode Local
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+**Fork no oficial y experimental de OpenCode, orientado a mejorar la integración con Ollama y optimizar la inferencia local en una NVIDIA RTX 5070.**
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+[English](README.md) · [Rama de desarrollo](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) · [PR #1 en borrador](https://github.com/wandoth1/opencode-local/pull/1)
 
----
+> **Autoría e independencia:** Este proyecto deriva de [OpenCode](https://github.com/anomalyco/opencode), creado por sus colaboradores originales. [wandoth1](https://github.com/wandoth1) mantiene el trabajo específico de esta variante. OpenCode Local no está desarrollado, respaldado ni mantenido por el equipo de OpenCode y no está afiliado a él.
+>
+> **Estado experimental:** Las correcciones del runtime y la reauditoría independiente siguen pendientes. La rama local no está lista para producción. Este proyecto todavía no ha demostrado una mejora de rendimiento en una RTX 5070 física.
 
-### Instalación
+## Qué es este proyecto
+
+OpenCode Local es una línea de desarrollo independiente sobre el código existente de OpenCode. No es un agente creado desde cero ni una versión oficial del proyecto original. Conserva el producto, las herramientas, las sesiones, la configuración y la infraestructura de proveedores heredadas, mientras desarrolla una integración local más consciente de los recursos del equipo.
+
+El objetivo inicial es **Windows con una NVIDIA GeForce RTX 5070 y Ollama**. Otras tarjetas de la serie RTX 50 y otros motores de inferencia son posibles ampliaciones futuras; no se presentan como hardware o integraciones ya probados.
+
+Los objetivos del desarrollo son:
+
+- Mejorar el descubrimiento de Ollama, los metadatos de modelos, el transporte nativo, el streaming y las llamadas a herramientas.
+- Ajustar los presupuestos de contexto y caché KV a la VRAM disponible, distinguiendo las estimaciones de los datos medidos.
+- Utilizar benchmarks reproducibles antes de afirmar mejoras de velocidad, consumo de memoria o descarga de trabajo a CPU.
+
+[vercel-labs/fx](https://github.com/vercel-labs/fx) sirve como referencia arquitectónica para separar agente, proveedor y transporte. Esto no significa que su runtime en Zig esté integrado en esta variante.
+
+## Dónde se desarrolla
+
+| Rama | Función |
+| --- | --- |
+| [`dev`](https://github.com/wandoth1/opencode-local/tree/dev) | Rama predeterminada y portada: base importada de OpenCode, presentación del fork y mantenimiento de las automatizaciones del repositorio. No contiene la implementación local que sigue sin fusionar. |
+| [`feature/local-foundation`](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation) | Desarrollo experimental de Ollama, diagnóstico de hardware y gestión de contexto. Aquí se revisan y corrigen esos cambios. |
+
+El punto de partida importado es `anomalyco/opencode@b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. Es una referencia histórica, no una afirmación de estar sincronizado con la última revisión del proyecto original.
+
+El repositorio se importó como una copia independiente. Aquí, **fork** describe el origen del código; no implica que GitHub lo muestre dentro de la red de forks del original. La PR #1 pertenece a `wandoth1/opencode-local`, no al repositorio de OpenCode.
+
+## Estado e instalación
+
+Los cambios locales siguen en desarrollo en la [PR #1 en borrador](https://github.com/wandoth1/opencode-local/pull/1), sin fusionar en `dev`. Los hallazgos de auditoría y los intentos fallidos de aplicar correcciones no deben confundirse con arreglos terminados ni con una validación satisfactoria del HEAD actual.
+
+Los mantenimientos heredados programados y los jobs temporales de aplicación de correcciones que se pausaron deben continuar pausados. Sus archivos YAML se conservan en `.github/disabled-workflows/` en la rama correspondiente. Este cambio de README no los reactiva ni lanza una compilación nueva.
+
+Para inspeccionar el código experimental:
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
-
-# Gestores de paquetes
-npm i -g opencode-ai@latest        # o bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS y Linux (recomendado, siempre al día)
-brew install opencode              # macOS y Linux (fórmula oficial de brew, se actualiza menos)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # cualquier sistema
-nix run nixpkgs#opencode           # o github:anomalyco/opencode para la rama dev más reciente
+git clone --single-branch --branch feature/local-foundation https://github.com/wandoth1/opencode-local.git
+cd opencode-local
 ```
 
-> [!TIP]
-> Elimina versiones anteriores a 0.1.x antes de instalar.
+**El instalador oficial de OpenCode, el paquete npm `opencode-ai` y las descargas de `anomalyco/opencode` instalan el programa original, no esta rama experimental.** Sus paquetes, versiones, distintivos de compilación y resultados de CI no acreditan que esta variante se haya compilado o validado.
 
-### App de escritorio (BETA)
+La documentación técnica de la rama está en [docs/local-foundation](https://github.com/wandoth1/opencode-local/tree/feature/local-foundation/docs/local-foundation). Describe la intención de la implementación; el código actual, los hallazgos y las comprobaciones del commit exacto prevalecen sobre afirmaciones antiguas de estado.
 
-OpenCode también está disponible como aplicación de escritorio. Descárgala directamente desde la [página de releases](https://github.com/anomalyco/opencode/releases) o desde [opencode.ai/download](https://opencode.ai/download).
+## Reconocimiento del proyecto original y licencia
 
-| Plataforma            | Descarga                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, o AppImage         |
+Se conservan sin cambios la [licencia MIT y el aviso de copyright originales](LICENSE). Las referencias a OpenCode en paquetes, comandos, claves de configuración, documentos históricos y recursos heredados reconocen el software original o mantienen compatibilidad; no implican respaldo oficial a este fork.
 
-```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
+El [README original en el commit importado](https://github.com/anomalyco/opencode/blob/b155b15694dbcc6768f11d2f25cc2bdd1f738ab4/README.es.md) sigue siendo la referencia del proyecto original. Otras traducciones heredadas pueden seguir describiendo OpenCode; los README en inglés y español de este repositorio describen OpenCode Local.
 
-#### Directorio de instalación
-
-El script de instalación respeta el siguiente orden de prioridad para la ruta de instalación:
-
-1. `$OPENCODE_INSTALL_DIR` - Directorio de instalación personalizado
-2. `$XDG_BIN_DIR` - Ruta compatible con la especificación XDG Base Directory
-3. `$HOME/bin` - Directorio binario estándar del usuario (si existe o se puede crear)
-4. `$HOME/.opencode/bin` - Alternativa por defecto
-
-```bash
-# Ejemplos
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
-
-### Agentes
-
-OpenCode incluye dos agentes integrados que puedes alternar con la tecla `Tab`.
-
-- **build** - Por defecto, agente con acceso completo para tareas de desarrollo
-- **plan** - Agente de solo lectura para análisis y exploración de código
-  - Deniega ediciones de archivos por defecto
-  - Pide permiso antes de ejecutar comandos bash
-  - Ideal para explorar codebases desconocidas o planificar cambios
-
-Además, incluye un subagente **general** para búsquedas complejas y tareas de varios pasos.
-Se usa internamente y se puede invocar con `@general` en los mensajes.
-
-Más información sobre [agentes](https://opencode.ai/docs/agents).
-
-### Documentación
-
-Para más información sobre cómo configurar OpenCode, [**ve a nuestra documentación**](https://opencode.ai/docs).
-
-### Contribuir
-
-Si te interesa contribuir a OpenCode, lee nuestras [docs de contribución](./CONTRIBUTING.md) antes de enviar un pull request.
-
-### Proyectos basados en OpenCode
-
-Si estás trabajando en un proyecto basado en OpenCode y usas "opencode" como parte del nombre, por ejemplo, "opencode-dashboard" u "opencode-mobile", agrega una nota en tu README para aclarar que no está hecho por el equipo de OpenCode y que no está afiliado con nosotros de ninguna manera.
-
----
-
-**Únete a nuestra comunidad** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+Las incidencias y propuestas específicas de esta variante deben tratarse en [wandoth1/opencode-local](https://github.com/wandoth1/opencode-local/issues), sin asumir soporte por parte de los mantenedores originales.
