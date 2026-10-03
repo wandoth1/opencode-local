@@ -31,9 +31,10 @@ test("doctor CLI reads global credentials and project model configuration", asyn
     await fs.writeFile(path.join(configDirectory, "opencode.json"), JSON.stringify({
       provider: { ollama: { options: { host: `http://127.0.0.1:${server.port}`, apiKey: "local-test-credential", keepAlive: "2m" } } },
     }))
+    // Core's persisted-config schema requires BOTH fields when limit is present.
     await fs.writeFile(path.join(projectDirectory, "opencode.json"), JSON.stringify({
       model: "ollama/fixture",
-      provider: { ollama: { models: { fixture: { name: "Project model", limit: { context: 1000 } } } } },
+      provider: { ollama: { models: { fixture: { name: "Project model", limit: { context: 1000, output: 250 } } } } },
     }))
     const environment = { ...process.env }
     for (const key of Object.keys(environment)) {
@@ -67,6 +68,7 @@ test("doctor CLI reads global credentials and project model configuration", asyn
     expect(report.selectedModel).toBe("fixture")
     expect(report.snapshot.models.fixture.name).toBe("Project model")
     expect(report.snapshot.models.fixture.limit.context).toBe(1000)
+    expect(report.snapshot.models.fixture.limit.output).toBe(250)
     expect(report.snapshot.version).toBe("test-runtime")
     expect(seen.length).toBeGreaterThanOrEqual(4)
     expect(seen.every((item) => item.authorized)).toBe(true)
