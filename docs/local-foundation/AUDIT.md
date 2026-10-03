@@ -1,53 +1,51 @@
-# Re-audit ledger
+# Independent re-audit ledger
 
 ## Scope and history
 
-- Original upstream baseline: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`.
-- First independent audit examined `a3a05dd538d4bf84b7921c8464950a74622c394b`. It was static-only; the auditor did not run Bun.
-- Failed archive-based hardening attempts are not evidence of implemented fixes or validation.
-- The replacement implementation is ordinary, reviewable source on `feature/local-foundation`. Record the exact current HEAD and CI test commit, not only a branch name.
+Imported upstream: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. The first independent audit examined `a3a05dd538d4bf84b7921c8464950a74622c394b` statically; it did not run Bun. Subsequent failed archive-based attempts are not evidence of fixes. Current changes are direct source on `feature/local-foundation`. Record the exact HEAD, base and CI synthetic merge commit before reviewing.
 
-## Corrections to inspect
+## Corrective coverage
 
-| Area | Implementation and regression coverage |
+| Area | Implementation and tests to challenge |
 | --- | --- |
-| Project config leaks credentials | Separately loaded global config, complete-endpoint credential binding, rejection of unauthorized remote hosts before network access and removal of unsafe fallback provider on initialization failure. |
-| Context below 4K inflated | Native maximum preserved, explicit override capped, output/history invariants including tiny declarations tested. |
-| Lost or invalid tool calls | Bounded ID/index accumulator, multiple and fragmented calls, late names, sparse indices, repeated indexed object snapshots, and conflicting identities tested. Tools are released only after valid completion. |
-| Premature EOF | Protocol error, never an invented successful stop or execution of incomplete tools. |
-| Doctor config differs from runtime | Real Config service path plus subprocess CLI test with a loopback HTTP fixture, global credential and project-specific model limits. |
-| Benchmark false success | Completed nonempty output required; thinking counts for TTFT; empty/partial/error responses fail. Cache-aware prefill and zero load duration are covered. |
-| Options silently lost | `top_k` and `max_completion_tokens` mapped; unsupported tool choices/external images explicitly rejected; omitted stream is non-streaming. |
-| Request/response cancellation hangs | No Request clone/unused tee; cleanup does not wait indefinitely for source cancellation; abort also discards already-buffered NDJSON frames. |
-| Shared cache/snapshot contamination | No process-global discovery cache or latestSnapshot. |
-| Error messages and diagnostics | No embedded URL credentials/query, no redirects, sanitized header/read/connection failures, and allowlisted diagnostic serialization. |
-| GPU estimates | No summed multi-GPU capacity, bounded reclaim of observed loaded allocation, no local GPU sizing of remote daemon. |
-| Hardware command lookup | Absolute known NVIDIA paths only, including WSL. No bare-command/PATH/current-directory fallback. |
-| Repository automation | Old schedules and self-modifying jobs remain archived. Only read-only PR/manual Linux and Windows validation is active. No archive chunks are required. |
+| Credential diversion | Separately loaded global config, complete-endpoint credential binding, rejection of unauthorized remote hosts, removal of unsafe provider on initialization failure. |
+| Small context maxima | Native maximum preserved, overrides capped, bounded output/history, tiny/pathological declarations tested. |
+| Lost tool calls | Bounded ID/index accumulator, multiple/fragmented/sparse calls, late names, repeated indexed object snapshots and conflicting identities. Tools released only after valid completion. |
+| Premature EOF | Protocol error, not invented success or execution of incomplete tools. |
+| Doctor configuration | Real Config service and subprocess CLI test using global credential plus project model limits against a loopback HTTP fixture. |
+| False benchmark success | Completed nonempty output required; thinking contributes to TTFT, cache-aware prefill and zero load duration tested. |
+| Lost request options | top_k and max_completion_tokens mapped; forced tool choices and external images explicitly rejected; omitted stream is non-streaming. |
+| Cancellation hangs | No Request.clone/unused tee; source cancellation not awaited indefinitely; abort discards already buffered NDJSON frames. |
+| Global state | Removed module-global discovery cache and latestSnapshot. |
+| Secrets/errors | Redirects disabled, embedded URL credentials rejected, header/read/connection errors sanitized, diagnostics use an allowlist. |
+| Memory telemetry | No summed multi-GPU capacity, bounded loaded-allocation reclaim, no client GPU sizing for a remote daemon. |
+| NVIDIA executable | Known absolute Windows/Linux/WSL paths; no PATH/current-directory fallback. |
+| Repository automation | Retired schedules/self-modifying jobs archived, chunks removed/ignored; only read-only PR/manual validation is active. |
 
-## Deliberate decisions
+## Reproduce exactly
 
-`bun test --only-failures` controls reporting, not selection; the workflow omits it for readable logs. Tool IDs are not function names. External image URLs are not fetched. Capabilities are not guessed solely from model names. A failed/truncated native stream must fail rather than be marked successful.
-
-Tool payloads are held until `done` while text/reasoning remain incremental. Indexed object snapshots and indexed string deltas are supported; ambiguous unindexed fragments and conflicting identities fail. Forced `tool_choice` is rejected because this adapter cannot guarantee its semantics.
-
-## Reproduce
-
-At repository root: `bun install --frozen-lockfile` with the pinned Bun version. Then in `packages/opencode`:
+Use pinned Bun 1.3.14 and a disposable clone without real credentials. Review install scripts first. At the repository root:
 
 ```bash
+bun install --frozen-lockfile --filter './' --filter './packages/opencode'
+git diff --exit-code -- bun.lock
+cd packages/opencode
 bun run typecheck
 bun test test/local --timeout 30000
 bun test test/provider/provider.test.ts test/plugin/modal-models.test.ts --timeout 30000
 bun run --conditions=browser src/index.ts local doctor --help
 ```
 
-Inspect the `Local runtime validation` run associated with the reviewed HEAD. PR CI normally checks GitHub's synthetic merge commit; record both that SHA and the PR head/base. The workflow does not commit, push, deploy, upload diagnostic artifacts or run on a schedule.
+The two filters install root development tooling and the agent dependency graph. Agent-only installation omits root type/SDK links used by core; unfiltered installation depends on an unavailable SolidStart preview tarball for hosted applications. Neither package versions nor the lockfile are changed to conceal this. This CI scope is the CLI agent, not the entire upstream monorepo/web products.
 
-## Remaining gates and limits
+Inspect the `Local runtime validation` run tied to the reviewed head and record the actual tested merge SHA. Tests/typecheck must run, not merely be skipped after failed install. The workflow has no schedule, commits, pushes, deploys or diagnostic-artifact upload. It checks that the lockfile stays unchanged. Formatting validation and full distributable builds are not implied by these checks.
 
-CI exercises mock HTTP/SDK contracts and a real CLI process, not a physical RTX 5070 or a real model generation. Before merge: independent re-audit, passing checks for the revised commit, owner activation of branch protection, and a Windows/Ollama/RTX 5070 smoke test.
+## Deliberate choices and limitations
 
-The ruleset JSON in `.github/protect-dev.ruleset.json` is a proposal, not proof that protection is active. Confirm rules in GitHub Settings. It requires PRs and both platform checks without requiring another reviewer while the owner works alone.
+`bun test --only-failures` controls output, not test selection. Tool IDs are not names. Truncated streams fail instead of emitting successful stop. External images are not fetched. Missing capabilities are not guessed from a model's name.
 
-VRAM/KV sizing is heuristic, not an architecture-general allocator or proof of GPU residency. `recommendedHistoryTokens` is diagnostic guidance, not a replacement agent compaction algorithm. The fork requests `truncate:false` and `shift:false`; daemon versions that ignore these fields are not thereby proven safe. No universal minimum compatible Ollama version or performance improvement is claimed. A missing cached-token counter is distinguishable from observed zero; compare equivalent cold/warm measurements and inspect the raw metrics. Direct llama.cpp integration, continuous GPU monitoring and a distributable release remain outside this milestone.
+Text/reasoning stream immediately; tools are held until done. Indexed object snapshots and indexed string deltas are supported, not arbitrary ambiguous cumulative strings. Forced tool_choice is rejected rather than silently ignored.
+
+VRAM/KV math is heuristic, not an architecture-general allocator or GPU residency guarantee. Concurrent daemon requests, other GPU workloads, hybrid/MLA/MoE architectures and model templates need real testing. `recommendedHistoryTokens` is diagnostic guidance, not a replacement compaction algorithm. `truncate:false` and `shift:false` are version-dependent requests; old daemons may ignore them. Cache counters, when absent, cannot establish cache-independent prefill speed. No minimum universally compatible Ollama version or acceleration figure is claimed.
+
+Before merge: independent adversarial re-audit, green checks for the revised commit, owner activation of branch protection and a real Windows/Ollama/RTX 5070 smoke test. `.github/protect-dev.ruleset.json` is a proposal, not proof of active protection. Direct llama.cpp integration, continuous GPU monitoring and distributable releases remain outside this milestone. Keep PR #1 in draft until those review gates are satisfied.
