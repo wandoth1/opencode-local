@@ -8,7 +8,7 @@ import {
   type LocalModelMetadata,
 } from "./runtime"
 
-const DEFAULT_CONTEXT = 16384
+const DEFAULT_CONTEXT = 32768
 const DEFAULT_OUTPUT = 8192
 const OVERHEAD = 384 * MIB
 const RESERVE = 1024 * MIB
@@ -81,7 +81,7 @@ export function recommendContext(input: ContextBudgetInput): ContextRecommendati
   const reasons = ["Context is selected for the agent, not reduced to fit transient free VRAM. Memory estimates are advisory."]
   if (requested) reasons.push("An explicit user or Modelfile context allocation was applied.")
   if (requested && requested > maximum) reasons.push("Requested context was capped at the model maximum.")
-  if (context < DEFAULT_CONTEXT) reasons.push("Context is below the 16K agent default: system instructions and tool schemas may not fit. Choose a larger window/model if the first turn overflows.")
+  if (context < DEFAULT_CONTEXT) reasons.push("Context is below the 32K agent default: system instructions, skills and tool schemas may not fit. Choose a larger window/model if the first turn overflows.")
   if (!kv) reasons.push("KV allocation is unknown for this architecture or incomplete metadata; no per-token GPU-fit estimate is made.")
   if (kv) reasons.push("KV estimate assumes conventional attention and the declared element precision; daemon allocation and concurrency can differ.")
   let availableVramBytes: number | undefined
