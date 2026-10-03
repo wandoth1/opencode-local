@@ -75,7 +75,7 @@ test("M3: hybrid, sliding-window and missing-KV metadata cannot claim a conventi
     const result = recommendContext({ model, hardware: hardware(11.5) })
     expect(result.confidence).toBe("low")
     expect(result.estimatedKvVramBytes).toBeUndefined()
-    expect(result.recommendedContextTokens).toBe(16384)
+    expect(result.recommendedContextTokens).toBe(32768)
   }
 })
 test("M1: bare hosts use 11434 and unspecified bind addresses become connectable", () => {
@@ -132,7 +132,7 @@ test("M2: doctor does not mistake plugin-produced model limits for user override
   const deps = { fetch: fixture, hardware: () => hardware(1) }
   await configureOllama(cfg, {}, deps)
   const report = await getDoctorReport(cfg, {}, {}, deps)
-  expect(report.snapshot.models.fixture.limit.context).toBe(16384)
+  expect(report.snapshot.models.fixture.limit.context).toBe(32768)
   expect(report.snapshot.models.fixture.context?.reasons.join(" ")).not.toContain("explicit user")
 }))
 test("M2: doctor with a dead override cannot reuse models from the initialized endpoint", async () => withEnv({}, async () => {
