@@ -21,13 +21,33 @@ export function checkAbort(signal?: AbortSignal | null) {
   throw new DOMException("Local runtime request aborted", "AbortError")
 }
 async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal | null) {
+  checkAbort(signal)
+  const read = reader.read()
+  if (!signal) {
+    try { return await read } catch { throw new Error("Local runtime response stream failed") }
+  }
+
+  let onAbort: (() => void) | undefined
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      try { checkAbort(signal) } catch (error) { reject(error) }
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener("abort", onAbort, { once: true })
+  })
+
   try {
-    const result = await reader.read()
+    const result = await Promise.race([read, interrupted])
     checkAbort(signal)
     return result
   } catch {
     checkAbort(signal)
     throw new Error("Local runtime response stream failed")
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort)
+    // Bun/Windows can leave reader.read() pending after cancel(). If abort won the
+    // race, detach any later read rejection so it cannot surface as unhandled.
+    if (signal.aborted) void read.catch(() => undefined)
   }
 }
 function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>) { void reader.cancel().catch(() => undefined) }
