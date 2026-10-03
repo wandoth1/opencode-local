@@ -41,6 +41,10 @@ async function sandbox(run: (input: Sandbox) => Promise<void>) {
   })
   const node = Bun.which("node")
   if (!node) throw new Error("The source-launcher integration test requires Node")
+  const git = Bun.spawnSync({ cmd: ["git", "init", "--quiet"], cwd: project, stdout: "ignore", stderr: "pipe" })
+  if (git.exitCode !== 0) {
+    throw new Error(`Could not initialize isolated git fixture: ${git.stderr.toString()}`)
+  }
   try {
     await run({
       project,
@@ -228,7 +232,7 @@ test("CLI: actual agent reads the selected project's file despite a stale inheri
       expect({ code: result.code, stderr: result.code ? result.stderr : "" }).toEqual({ code: 0, stderr: "" })
       expect(result.stdout).toContain("OK")
       expect(generated.some((request) => request.result)).toBe(true)
-      expect(generated.every((request) => request.context === 16384)).toBe(true)
+      expect(generated.every((request) => request.context === 32768)).toBe(true)
       expect(generated.length).toBeLessThan(12)
     } finally {
       good.server.stop(true)
