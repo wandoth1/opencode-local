@@ -25,7 +25,7 @@ export function daemonError(value: unknown, status?: number): LocalRuntimeError 
     return new LocalRuntimeError("The requested Ollama model or endpoint was not found. Check the model name and installed models.")
   }
   if (status === 401 || status === 403) {
-    return new LocalRuntimeError("Ollama authentication failed. Check the credentials bound to this endpoint in global configuration.")
+    return new LocalRuntimeError(`Ollama authentication failed (HTTP ${status}). Check the credentials bound to this endpoint in global configuration.`)
   }
   if (status === 429) return new LocalRuntimeError("Ollama is busy or rate limited. Retry after the current request completes.")
   return new LocalRuntimeError(status ? `Ollama returned HTTP ${status}` : "Ollama reported a generation error")

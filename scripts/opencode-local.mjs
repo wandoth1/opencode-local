@@ -2,21 +2,27 @@
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { createRequire } from "node:module"
+import { homedir } from "node:os"
+import path from "node:path"
 
-// Invoke with Node, not `bun run`: a Bun parent can already have loaded .env
-// before starting this wrapper. Keep the caller's cwd for project discovery.
+// Use Node, not a Bun parent that may already have loaded the project's .env.
+// Do not resolve Bun through PATH/current-directory on Windows.
+const executable = process.env.OPENCODE_BUN || path.join(homedir(), ".bun", "bin", process.platform === "win32" ? "bun.exe" : "bun")
+if (!path.isAbsolute(executable)) {
+  console.error("OPENCODE_BUN must be an absolute path to a trusted Bun executable.")
+  process.exit(1)
+}
 const entry = fileURLToPath(new URL("../packages/opencode/src/index.ts", import.meta.url))
 const require = createRequire(new URL("../packages/opencode/package.json", import.meta.url))
 const preload = require.resolve("@opentui/solid/preload")
 const config = fileURLToPath(new URL("./local-runtime.bunfig.toml", import.meta.url))
-const executable = process.env.OPENCODE_BUN || "bun"
-const child = spawn(executable, ["run", "--no-env-file", "--config", config, "--conditions=browser", "--preload", preload, entry, ...process.argv.slice(2)], {
+const child = spawn(executable, ["run", "--no-env-file", `--config=${config}`, "--conditions=browser", `--preload=${preload}`, entry, ...process.argv.slice(2)], {
   stdio: "inherit",
   shell: false,
   env: { ...process.env },
 })
 child.on("error", () => {
-  console.error("Could not start the trusted Bun executable. Install Bun 1.3.14 or set OPENCODE_BUN to its absolute path.")
+  console.error("Could not start Bun from its user installation. Install Bun 1.3.14 or set OPENCODE_BUN to its trusted absolute path.")
   process.exitCode = 1
 })
 child.on("exit", (code, signal) => {

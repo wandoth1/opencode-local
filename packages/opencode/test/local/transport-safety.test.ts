@@ -1,21 +1,9 @@
 import { test } from "bun:test"
 import assert from "node:assert/strict"
-import { GIB, finitePositive, redactSecrets, type HardwareSnapshot, type LocalModelMetadata } from "@/local/runtime"
-import { recommendContext, estimateKvBytesPerToken, extractContextLength } from "@/local/context-budget"
-import { parseNvidiaSmiCsv } from "@/local/hardware"
-import { OllamaClient, normalizeOllamaHost, isLoopbackOllamaHost } from "@/local/ollama/client"
+import { OllamaClient } from "@/local/ollama/client"
 import { openAIToOllamaRequest, createOllamaNativeFetch, type FetchLike } from "@/local/ollama/transport"
-import { resolveOllamaSettings, configureOllama, discoverOllama, diagnosticSnapshot } from "@/local/ollama/integration"
-import { getDoctorReport } from "@/local/doctor"
 import { boundedText, readNdjson } from "@/local/ollama/io"
-const noHardware: HardwareSnapshot = { platform: "test", architecture: "x64", cpuModel: "fixture", cpuCount: 4,
-  systemMemoryTotalBytes: 64 * GIB, systemMemoryFreeBytes: 32 * GIB, nvidiaGpus: [] }
-const model: LocalModelMetadata = { id: "fixture:8b", families: ["llama"], family: "llama", fileSizeBytes: 8 * GIB,
-  contextLength: 32768, capabilities: ["completion", "tools"], modelInfo: { "general.architecture": "llama",
-    "llama.block_count": 32, "llama.embedding_length": 4096, "llama.attention.head_count": 32, "llama.attention.head_count_kv": 8 } }
-const hardware = (free = 11.5): HardwareSnapshot => ({ ...noHardware, nvidiaGpus: [{ index: 0, name: "RTX 5070",
-  memoryTotalBytes: 12 * GIB, memoryFreeBytes: free * GIB, memoryUsedBytes: (12 - free) * GIB }] })
-const config = (options = {}, models = {}): any => ({ provider: { ollama: { options, models } } })
+
 const tools = ["a", "b", "read_file"].map((name) => ({ type: "function", function: { name, parameters: { type: "object" } } }))
 const request = (extra = {}): any => ({ model: "fixture", messages: [{ role: "user", content: "hello" }], ...extra })
 const frame = (message = {}, done = false, extra = {}): any => ({ model: "fixture", message, done, ...extra })
@@ -32,21 +20,6 @@ async function streamed(frames: unknown[], extra = {}) {
   return response.text()
 }
 function packets(text: string): any[] { return text.split("\n\n").filter((line) => line.startsWith("data: {")).map((line) => JSON.parse(line.slice(6))) }
-async function withEnv(values: Record<string, string | undefined>, fn: () => unknown | Promise<unknown>) {
-  const keys = ["OPENCODE_LOCAL_DISABLE", "OPENCODE_OLLAMA_HOST", "OLLAMA_HOST", "OPENCODE_OLLAMA_API_KEY", "OPENCODE_OLLAMA_AUTODETECT", ...Object.keys(values)]
-  const saved = new Map(keys.map((key) => [key, process.env[key]]))
-  try { for (const key of keys) delete process.env[key]; for (const [key, value] of Object.entries(values)) if (value !== undefined) process.env[key] = value; await fn() }
-  finally { for (const [key, value] of saved) if (value === undefined) delete process.env[key]; else process.env[key] = value }
-}
-const fixtureFetch: FetchLike = async (input) => {
-  const path = new URL(String(input)).pathname
-  if (path.endsWith("/api/tags")) return Response.json({ models: [{ name: "fixture", size: 1000000000 }] })
-  if (path.endsWith("/api/show")) return Response.json({ capabilities: ["completion", "tools"], model_info: { "general.architecture": "llama", "llama.context_length": 2048 } })
-  if (path.endsWith("/api/version")) return Response.json({ version: "fixture-version" })
-  if (path.endsWith("/api/ps")) return Response.json({ models: [] })
-  throw new Error("Unexpected fixture endpoint")
-}
-const deps = { fetch: fixtureFetch, hardware: () => noHardware }
 
 test("client rejects malformed model list and HTTP error without leaking body", async () => {
   await assert.rejects(new OllamaClient({ fetch: async () => Response.json({ models: [null] }) }).tags())
@@ -155,5 +128,8 @@ test("benchmark counts reasoning TTFT and final frame without newline", async ()
   const client = new OllamaClient({ fetch: async () => ndjson([frame({ content: "", thinking: "first reasoning" }),
     frame({ content: "ok" }, true, { eval_count: 3, eval_duration: 100000000, prompt_eval_count: 10, prompt_eval_duration: 200000000 })], false) })
   const result = await client.benchmark({ model: "fixture", contextTokens: 2048 })
-  assert(result.timeToFirstTokenMs !== undefined); assert.equal(result.outputTokensPerSecond, 30); assert.equal(result.promptTokensPerSecond, 50)
+  assert(result.timeToFirstTokenMs !== undefined)
+  assert.equal(result.outputTokensPerSecond, 30)
+  // Unknown cached tokens cannot establish cache-independent prefill throughput.
+  assert.equal(result.promptTokensPerSecond, undefined)
 })
