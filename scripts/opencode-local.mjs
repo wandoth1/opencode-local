@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { createRequire } from "node:module"
 import { homedir } from "node:os"
 import path from "node:path"
 
@@ -13,8 +12,9 @@ if (!path.isAbsolute(executable)) {
   process.exit(1)
 }
 const entry = fileURLToPath(new URL("../packages/opencode/src/index.ts", import.meta.url))
-const require = createRequire(new URL("../packages/opencode/package.json", import.meta.url))
-const preload = require.resolve("@opentui/solid/preload")
+// Resolve the conditional `bun` package export INSIDE Bun. Node's resolver
+// selects the package's deliberately failing Node-only compatibility stub.
+const preload = fileURLToPath(new URL("../packages/opencode/script/local-preload.ts", import.meta.url))
 const config = fileURLToPath(new URL("./local-runtime.bunfig.toml", import.meta.url))
 const child = spawn(executable, ["run", "--no-env-file", `--config=${config}`, "--conditions=browser", `--preload=${preload}`, entry, ...process.argv.slice(2)], {
   stdio: "inherit",

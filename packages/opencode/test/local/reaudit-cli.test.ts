@@ -61,6 +61,16 @@ function daemon(chat?: (request: Request) => Response | Promise<Response>) {
   return { server, requests, host: `http://127.0.0.1:${server.port}` }
 }
 
+test("CLI: Node source launcher actually reaches the registered doctor command", async () => {
+  await sandbox(async ({ command }) => {
+    const result = await command(["local", "doctor", "--help"])
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("diagnose the configured Ollama runtime")
+    expect(result.stdout).toContain("--benchmark-timeout-ms")
+    expect(result.stderr).not.toContain("Bun-only")
+  })
+}, 45000)
+
 test("CLI: closed host override fails instead of reporting models from the original daemon", async () => {
   const good = daemon()
   const unused = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unused") })
@@ -71,7 +81,9 @@ test("CLI: closed host override fails instead of reporting models from the origi
       await writeGlobal({ provider: { ollama: { options: { host: good.host } } } })
       const result = await command(["local", "doctor", "--host", dead, "--json"])
       expect(result.code).not.toBe(0)
+      expect(result.stderr).toContain("Ollama connection failed")
       expect(result.stdout).not.toContain('"models"')
+      expect(good.requests.some((request) => request.path === "/api/tags")).toBe(true)
     })
   } finally { good.server.stop(true) }
 }, 45000)
@@ -108,6 +120,9 @@ test("CLI: disabled local provider never sends a merged global key to a project 
       } }))
       const result = await command(["run", "--model", "ollama/fixture", "Reply OK"], { OPENCODE_LOCAL_DISABLE: "1" })
       expect(result.code).not.toBe(0)
+      expect(result.stderr.toLowerCase()).toContain("model")
+      expect(result.stderr).not.toContain("Bun-only")
+      expect(result.stderr).not.toContain("Could not start Bun")
       expect(other.requests).toHaveLength(0)
       expect(result.stdout + result.stderr).not.toContain("global-fixture-key")
     })
@@ -122,11 +137,14 @@ test("CLI: actual agent completes a file-read tool turn within its default conte
     const estimatedPrompt = Math.ceil(JSON.stringify({ messages, tools: body.tools }).length / 4)
     const context = body.options.num_ctx as number
     const result = messages.some((message) => message.role === "tool" && message.content.includes("LOCAL_FIXTURE_VALUE"))
+    const canRead = body.tools?.some((tool: { function: { name: string } }) => tool.function.name === "read")
     generated.push({ context, estimatedPrompt, result })
-    if (context < Math.max(7342, estimatedPrompt) || generated.length > 4) {
+    if (context < Math.max(7342, estimatedPrompt) || generated.length > 12) {
       return Response.json({ error: "request exceeds the available context size" }, { status: 400 })
     }
-    const message = result ? { role: "assistant", content: "OK" } : {
+    // Background title/summarization calls have no read tool. Never invent a
+    // tool call for such requests: their contract differs from the agent turn.
+    const message = result || !canRead ? { role: "assistant", content: "OK" } : {
       role: "assistant", content: "", tool_calls: [{ id: "read-fixture", function: {
         index: 0, name: "read", arguments: { filePath: "proof.txt" },
       } }],
