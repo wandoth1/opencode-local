@@ -1,33 +1,63 @@
 import { Buffer } from "node:buffer"
-/** Shared, bounded I/O. Error messages deliberately never echo server bodies or credentials. */
+
+/** Bounded I/O. Never include server bodies, URLs or credentials in transport errors. */
 export const MAX_JSON_BYTES = 16 * 1024 * 1024
 export const MAX_FRAME_BYTES = 2 * 1024 * 1024
 export type Json = Record<string, any>
+
 export function object(value: unknown): Json | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined
 }
+
 export function jsonObject(text: string): Json {
   let value: unknown
-  try { value = JSON.parse(text) } catch { throw new Error("Invalid Ollama JSON") }
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error("Invalid Ollama JSON")
+  }
   const result = object(value)
   if (!result) throw new Error("Ollama JSON must be an object")
   return result
 }
+
 export function checkAbort(signal?: AbortSignal | null) {
   if (signal?.aborted) throw new DOMException("Local runtime request aborted", "AbortError")
 }
-export async function boundedText(body: ReadableStream<Uint8Array> | null, signal?: AbortSignal | null, limit = MAX_JSON_BYTES) {
+
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal | null) {
+  try {
+    const result = await reader.read()
+    checkAbort(signal)
+    return result
+  } catch {
+    checkAbort(signal)
+    // A custom fetch/reader may reject with a URL, key or server error. Do not forward it.
+    throw new Error("Local runtime response stream failed")
+  }
+}
+
+/** Cancellation can wait for the other branch of a tee or an uncooperative source.
+ * Initiate it, handle its rejection, and release our lock without awaiting that promise. */
+function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  void reader.cancel().catch(() => undefined)
+}
+
+export async function boundedText(
+  body: ReadableStream<Uint8Array> | null,
+  signal?: AbortSignal | null,
+  limit = MAX_JSON_BYTES,
+) {
   if (!body) throw new Error("Ollama returned an empty response body")
   const reader = body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
-  const abort = () => { void reader.cancel().catch(() => undefined) }
+  const abort = () => cancelReader(reader)
   signal?.addEventListener("abort", abort, { once: true })
   try {
     checkAbort(signal)
     while (true) {
-      const next = await reader.read()
-      checkAbort(signal)
+      const next = await readChunk(reader, signal)
       if (next.done) break
       size += next.value.byteLength
       if (size > limit) throw new Error("Local runtime JSON exceeds its size limit")
@@ -35,29 +65,41 @@ export async function boundedText(body: ReadableStream<Uint8Array> | null, signa
     }
     const bytes = new Uint8Array(size)
     let offset = 0
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes) }
-    catch { throw new Error("Invalid UTF-8 from local runtime") }
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+    } catch {
+      throw new Error("Invalid UTF-8 from local runtime")
+    }
   } finally {
     signal?.removeEventListener("abort", abort)
-    await reader.cancel().catch(() => undefined)
+    cancelReader(reader)
     reader.releaseLock()
   }
 }
-export async function* readNdjson(body: ReadableStream<Uint8Array> | null, signal?: AbortSignal | null): AsyncGenerator<Json> {
+
+export async function* readNdjson(
+  body: ReadableStream<Uint8Array> | null,
+  signal?: AbortSignal | null,
+): AsyncGenerator<Json> {
   if (!body) throw new Error("Ollama returned an empty response body")
   const reader = body.getReader()
   const decoder = new TextDecoder("utf-8", { fatal: true })
   let pending = ""
-  const abort = () => { void reader.cancel().catch(() => undefined) }
+  const abort = () => cancelReader(reader)
   signal?.addEventListener("abort", abort, { once: true })
   try {
     checkAbort(signal)
     while (true) {
-      const { done, value } = await reader.read()
-      checkAbort(signal)
-      try { pending += done ? decoder.decode() : decoder.decode(value, { stream: true }) }
-      catch { throw new Error("Invalid UTF-8 from Ollama") }
+      const { done, value } = await readChunk(reader, signal)
+      try {
+        pending += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      } catch {
+        throw new Error("Invalid UTF-8 from Ollama")
+      }
       let newline: number
       while ((newline = pending.indexOf("\n")) >= 0) {
         const line = pending.slice(0, newline)
@@ -71,7 +113,7 @@ export async function* readNdjson(body: ReadableStream<Uint8Array> | null, signa
     if (pending.trim()) yield jsonObject(pending)
   } finally {
     signal?.removeEventListener("abort", abort)
-    await reader.cancel().catch(() => undefined)
+    cancelReader(reader)
     reader.releaseLock()
   }
 }
