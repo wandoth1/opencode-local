@@ -12,7 +12,7 @@ test("locked AI SDK consumes native text, reasoning, usage and multiple tool cal
     ]
     return new Response(frames.map((frame) => JSON.stringify(frame)).join("\n"), { headers: { "Content-Type": "application/x-ndjson" } })
   } })
-  const provider = createOpenAICompatible({ name: "ollama", baseURL: "http://127.0.0.1:11434/v1", fetch: wire })
+  const provider = createOpenAICompatible({ name: "ollama", baseURL: "http://127.0.0.1:11434/v1", fetch: Object.assign(wire, { preconnect: fetch.preconnect }) })
   const result = await provider.chatModel("fixture").doStream({
     prompt: [{ role: "user", content: [{ type: "text", text: "Read a and b" }] }],
     tools: [{ type: "function", name: "read_file", inputSchema: { type: "object", properties: { path: { type: "string" } } } }],

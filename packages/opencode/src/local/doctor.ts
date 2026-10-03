@@ -1,4 +1,4 @@
-import type { Config } from "@opencode-ai/plugin"
+import type { LocalConfig as Config } from "./runtime"
 import { OllamaClient } from "./ollama/client"
 import { diagnosticSnapshot, discoverOllama, resolveOllamaSettings, type OllamaDependencies } from "./ollama/integration"
 export interface DoctorArgs { host?: string; model?: string; numCtx?: number; json?: boolean; benchmark?: boolean; outputTokens?: number }

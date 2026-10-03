@@ -1,4 +1,4 @@
-import type { Config } from "@opencode-ai/plugin"
+import type { LocalConfig as Config } from "../runtime"
 import { detectHardware } from "../hardware"
 import { finitePositive, type HardwareSnapshot, type LocalModelProfile, type RuntimeCapabilities } from "../runtime"
 import { OllamaClient, isLoopbackOllamaHost, normalizeOllamaHost, type OllamaDiscoveryModel } from "./client"
@@ -135,7 +135,12 @@ export async function configureOllama(config: Config, trustedConfig: Config = {}
     if (mutable.provider) delete mutable.provider.ollama
     throw error
   }
-  const snapshot = await discoverOllama(config, settings, dependencies)
+  let snapshot: OllamaIntegrationSnapshot | undefined
+  try { snapshot = await discoverOllama(config, settings, dependencies) }
+  catch {
+    if (mutable.provider) delete mutable.provider.ollama
+    throw new Error("Ollama provider initialization failed safely")
+  }
   if (!snapshot) { if (mutable.provider) delete mutable.provider.ollama; return }
   const contexts = Object.fromEntries(Object.entries(snapshot.models).map(([id, model]) => [id, model.limit.context]))
   const transport = createOllamaNativeFetch({ host: settings.host, contexts, keepAlive: settings.keepAlive,

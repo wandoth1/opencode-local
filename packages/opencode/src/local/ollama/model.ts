@@ -1,4 +1,4 @@
-import type { HardwareSnapshot, LocalModelProfile } from "../runtime"
+import { finitePositive, type HardwareSnapshot, type LocalModelProfile } from "../runtime"
 import { recommendContext } from "../context-budget"
 import type { OllamaDiscoveryModel, OllamaRunningModel } from "./client"
 export interface OllamaProviderModel {
@@ -30,7 +30,7 @@ export function buildOllamaModel(item: OllamaDiscoveryModel, options: OllamaMode
   const variants: Record<string, Record<string, unknown>> = !reasoning ? {} : levels
     ? { low: { reasoningEffort: "low" }, medium: { reasoningEffort: "medium" }, high: { reasoningEffort: "high" } }
     : { none: { reasoningEffort: "none" }, enabled: { reasoningEffort: "high" } }
-  const date = item.tag.modified_at?.slice(0, 10) ?? ""
+  const date = typeof item.tag.modified_at === "string" ? item.tag.modified_at.slice(0, 10) : ""
   const model: OllamaProviderModel = {
     name: [meta.id, [meta.parameterSize, meta.quantization].filter(Boolean).join(" · ")].filter(Boolean).join(" · "),
     family: meta.family ?? "local", release_date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "", status: "active", temperature: true,
@@ -39,6 +39,6 @@ export function buildOllamaModel(item: OllamaDiscoveryModel, options: OllamaMode
     modalities: { input: vision ? ["text", "image"] : ["text"], output: ["text"] },
     provider: { npm: "@ai-sdk/openai-compatible", api: options.openAIBaseURL }, options: {}, headers: {}, variants,
   }
-  return { model, profile: { metadata: meta, context, loaded: running ? { sizeBytes: running.size, sizeVramBytes: running.size_vram,
-    contextLength: running.context_length, expiresAt: running.expires_at } : undefined } }
+  return { model, profile: { metadata: meta, context, loaded: running ? { sizeBytes: finitePositive(running.size), sizeVramBytes: finitePositive(running.size_vram),
+    contextLength: finitePositive(running.context_length), expiresAt: typeof running.expires_at === "string" && /^\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?$/.test(running.expires_at) ? running.expires_at : undefined } : undefined } }
 }

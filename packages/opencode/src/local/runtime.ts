@@ -1,6 +1,14 @@
 export const MIB = 1024 * 1024
 export const GIB = 1024 * MIB
 export type LocalBackend = "ollama" | "llama.cpp"
+/** Narrow configuration boundary shared by the current core and older plugin SDK.
+ * Other fields (including agent permissions) are deliberately outside this module. */
+export interface LocalConfig {
+  provider?: unknown
+  enabled_providers?: unknown
+  disabled_providers?: unknown
+  model?: unknown
+}
 export interface NvidiaGpuSnapshot {
   index: number
   name: string
@@ -77,7 +85,7 @@ export function formatBytes(bytes: number | undefined): string {
 }
 function sensitiveKey(key: string) {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase()
-  return /header|cookie|apikey|authorization|token|password|secret|credential|bearer/.test(normalized) || normalized === "auth"
+  return /cookie|apikey|authorization|token|password|secret|credential|bearer/.test(normalized) || normalized === "auth" || normalized === "header" || normalized.endsWith("headers")
 }
 export function redactSecrets(value: unknown): unknown {
   const seen = new WeakSet<object>()
