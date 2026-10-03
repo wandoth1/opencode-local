@@ -1,7 +1,7 @@
 import type { LocalConfig } from "./runtime"
 import { OllamaClient } from "./ollama/client"
 import { LocalRuntimeError } from "./ollama/errors"
-import { diagnosticSnapshot, discoverOllama, originalOllamaConfig, resolveOllamaSettings, type OllamaDependencies } from "./ollama/integration"
+import { diagnosticSnapshot, discoverOllama, originalOllamaConfig, providerAllowed, resolveOllamaSettings, type OllamaDependencies } from "./ollama/integration"
 
 export interface DoctorArgs {
   host?: string
@@ -21,6 +21,7 @@ export async function getDoctorReport(config: LocalConfig, globalConfig: LocalCo
     throw new LocalRuntimeError("--benchmark-timeout-ms must be zero or positive milliseconds up to 2147483647")
   }
   const source = originalOllamaConfig(config)
+  if (!providerAllowed(source)) throw new LocalRuntimeError("Ollama is disabled by OPENCODE_LOCAL_DISABLE or provider configuration")
   const preferred = typeof source.model === "string" && source.model.startsWith("ollama/") ? source.model.slice(7) : undefined
   const selected = args.model ?? preferred
   if (args.benchmark && !selected) throw new LocalRuntimeError("Benchmark requires --model or an explicit ollama/ model in configuration; no model will be loaded implicitly.")
