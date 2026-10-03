@@ -1,29 +1,18 @@
-### Issue for this PR
+## Change
 
-Closes #
+Explain the problem addressed in this unofficial OpenCode Local fork.
 
-### Type of change
+## Verification
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Refactor / code improvement
-- [ ] Documentation
+- Exact commit and commands tested:
+- Operating system, Bun version and results:
+- Real Ollama/GPU results, if any (distinguish mocks from measurements):
 
-### What does this PR do?
+## Safety and attribution
 
-Please provide a description of the issue, the changes you made to fix it, and why they work. It is expected that you understand why your changes work and if you do not understand why at least say as much so a maintainer knows how much to value the PR.
+- [ ] No secrets, generated archive chunks, automatic commits or scheduled jobs.
+- [ ] Upstream license and attribution preserved.
+- [ ] Network, tool permissions and model/context limits reviewed.
+- [ ] Documentation distinguishes experimental behavior from measured performance.
 
-**If you paste a large clearly AI generated description here your PR may be IGNORED or CLOSED!**
-
-### How did you verify your code works?
-
-### Screenshots / recordings
-
-_If this is a UI change, please include a screenshot or recording._
-
-### Checklist
-
-- [ ] I have tested my changes locally
-- [ ] I have not included unrelated changes in this PR
-
-_If you do not follow this template your PR will be automatically rejected._
+Target `dev` through a pull request. A review from an AI is useful evidence, not a GitHub approval or a replacement for the maintainer's decision.

@@ -1,0 +1,60 @@
+name: Local runtime validation
+
+on:
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: local-runtime-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Record tested commit
+        run: git rev-parse HEAD
+      - name: Set up pinned Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+      - name: Install locked dependencies
+        id: install
+        run: bun install --frozen-lockfile
+      - name: Typecheck OpenCode
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/opencode
+        run: bun run typecheck
+      - name: Local runtime regression and SDK contract tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/opencode
+        run: bun test test/local --timeout 30000
+      - name: Existing provider regression tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/opencode
+        run: bun test test/provider/provider.test.ts test/plugin/modal-models.test.ts --timeout 30000
+      - name: Verify CLI registration
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: packages/opencode
+        run: bun run --conditions=browser src/index.ts local doctor --help
