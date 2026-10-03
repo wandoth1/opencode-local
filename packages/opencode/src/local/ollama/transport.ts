@@ -1,16 +1,19 @@
+import { Buffer } from "node:buffer"
 import { normalizeOllamaHost, ollamaHeaders } from "./client"
 import { boundedText, checkAbort, jsonObject, object, readNdjson, MAX_FRAME_BYTES, type Json } from "./io"
+import { daemonError, responseError } from "./errors"
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-
 export interface OllamaNativeTransportOptions {
   host: string
   contexts: Record<string, number>
+  toolSupport?: Record<string, boolean>
   keepAlive?: string
   enabled?: boolean
   fetch?: FetchLike
   apiKey?: string
   headers?: Record<string, string>
+  /** Explicit total deadline only. By default, honor the core's cancellation/timeouts. */
   generationTimeoutMs?: number
 }
 
@@ -21,7 +24,6 @@ function argumentsObject(value: unknown): Json {
   if (!result) throw new Error("Tool arguments must be a JSON object")
   return result
 }
-
 function contentParts(value: unknown): { content: string; images: string[] } {
   if (value === null || value === undefined) return { content: "", images: [] }
   if (typeof value === "string") return { content: value, images: [] }
@@ -44,21 +46,16 @@ function contentParts(value: unknown): { content: string; images: string[] } {
   }
   return { content: text.join("\n"), images }
 }
-
 function convertMessages(raw: unknown): Json[] {
   if (!Array.isArray(raw)) throw new Error("messages must be an array")
   const names = new Map<string, string>()
   return raw.map((value) => {
     const message = object(value)
-    if (!message || !["system", "developer", "user", "assistant", "tool"].includes(message.role)) {
-      throw new Error("Unsupported message role")
-    }
+    if (!message || !["system", "developer", "user", "assistant", "tool"].includes(message.role)) throw new Error("Unsupported message role")
     const parts = contentParts(message.content)
     const result: Json = { role: message.role === "developer" ? "system" : message.role, content: parts.content }
     if (parts.images.length) result.images = parts.images
-    const thinking = [message.thinking, message.reasoning, message.reasoning_content].find(
-      (item) => typeof item === "string" && item.length,
-    )
+    const thinking = [message.thinking, message.reasoning, message.reasoning_content].find((item) => typeof item === "string" && item.length)
     if (message.role === "assistant" && thinking) result.thinking = thinking
     if (message.tool_calls !== undefined) {
       if (!Array.isArray(message.tool_calls) || message.role !== "assistant") throw new Error("Invalid assistant tool calls")
@@ -83,7 +80,6 @@ function convertMessages(raw: unknown): Json[] {
     return result
   })
 }
-
 function thinking(body: Json): boolean | string | undefined {
   const effort = body.reasoning_effort ?? object(body.reasoning)?.effort
   if (effort === undefined) return undefined
@@ -94,7 +90,6 @@ function thinking(body: Json): boolean | string | undefined {
   }
   return effort !== "none"
 }
-
 function responseFormat(value: unknown) {
   if (value === undefined) return undefined
   const format = object(value)
@@ -111,17 +106,13 @@ export function openAIToOllamaRequest(body: Json, contextTokens?: number, keepAl
   if (typeof body.model !== "string" || !body.model) throw new Error("A model name is required")
   if (body.stream !== undefined && typeof body.stream !== "boolean") throw new Error("stream must be boolean")
   if (body.n !== undefined && body.n !== 1) throw new Error("Native Ollama supports one completion per request")
-  if (body.tool_choice !== undefined && !["auto", "none"].includes(body.tool_choice)) {
-    throw new Error("Native Ollama only supports tool_choice auto or none")
-  }
+  if (body.tool_choice !== undefined && !["auto", "none"].includes(body.tool_choice)) throw new Error("Native Ollama only supports tool_choice auto or none")
   const tools = body.tool_choice === "none" ? undefined : body.tools
   if (tools !== undefined) {
     if (!Array.isArray(tools) || tools.length > 128) throw new Error("Native Ollama accepts at most 128 function tools")
     for (const tool of tools) {
       const fn = object(object(tool)?.function)
-      if (!fn || tool.type !== "function" || typeof fn.name !== "string" || !fn.name || fn.name.length > 256) {
-        throw new Error("Only named function tools are supported")
-      }
+      if (!fn || tool.type !== "function" || typeof fn.name !== "string" || !fn.name || fn.name.length > 256) throw new Error("Only named function tools are supported")
     }
   }
   const options: Json = {}
@@ -153,7 +144,6 @@ export function openAIToOllamaRequest(body: Json, contextTokens?: number, keepAl
     keep_alive: keepAlive,
     options,
     think: thinking(body),
-    // These are daemon-version-dependent safeguards, not a client-side tokenizer.
     truncate: false,
     shift: false,
   }
@@ -164,14 +154,13 @@ interface ToolState {
   id: string
   nativeId?: string
   name: string
-  args: string | Json
-  fragmented: boolean
+  fragments: string[]
+  snapshot?: string
 }
-
-/** Text streams immediately; bounded tool payloads are held until a valid done frame. */
 class ToolAccumulator {
   private readonly states: ToolState[] = []
   private readonly aliases = new Map<string, ToolState>()
+  private bytes = 0
   constructor(private readonly allowed: Set<string>) {}
 
   add(raw: unknown) {
@@ -182,9 +171,7 @@ class ToolAccumulator {
       const fn = object(call?.function)
       if (!fn) throw new Error("Invalid native tool function")
       const rawIndex = call?.index ?? fn.index
-      if (rawIndex !== undefined && (!Number.isSafeInteger(rawIndex) || rawIndex < 0)) {
-        throw new Error("Invalid native tool index")
-      }
+      if (rawIndex !== undefined && (!Number.isSafeInteger(rawIndex) || rawIndex < 0)) throw new Error("Invalid native tool index")
       const id = typeof call?.id === "string" && call.id ? call.id : undefined
       if (id && id.length > 256) throw new Error("Native tool ID too long")
       const indexKey = rawIndex !== undefined ? `index:${rawIndex}` : undefined
@@ -192,17 +179,8 @@ class ToolAccumulator {
       let state = (idKey && this.aliases.get(idKey)) || (indexKey && this.aliases.get(indexKey)) || undefined
       if (!state) {
         if (this.states.length >= 128) throw new Error("Too many native tool calls")
-        if (typeof fn.arguments === "string" && !idKey && !indexKey) {
-          throw new Error("Fragmented tool arguments require an ID or index")
-        }
-        state = {
-          index: this.states.length,
-          id: id ?? `call_${crypto.randomUUID()}`,
-          nativeId: id,
-          name: "",
-          args: {},
-          fragmented: false,
-        }
+        if (typeof fn.arguments === "string" && !idKey && !indexKey) throw new Error("Fragmented tool arguments require an ID or index")
+        state = { index: this.states.length, id: id ?? `call_${crypto.randomUUID()}`, nativeId: id, name: "", fragments: [] }
         this.states.push(state)
       }
       for (const alias of [idKey, indexKey]) {
@@ -215,74 +193,65 @@ class ToolAccumulator {
         if (state.nativeId && state.nativeId !== id) throw new Error("Conflicting native tool identity")
         state.id = id
         state.nativeId = id
+        this.bytes += Buffer.byteLength(id)
       }
       if (fn.name !== undefined) {
         if (typeof fn.name !== "string" || fn.name.length > 256) throw new Error("Invalid native tool name")
-        if (!state.name || fn.name.startsWith(state.name)) state.name = fn.name
-        else if (fn.name !== state.name) {
-          if (this.allowed.has(state.name)) throw new Error("Conflicting native tool name")
-          state.name += fn.name
-        }
+        if (state.name && this.allowed.has(state.name) && fn.name !== state.name) throw new Error("Conflicting native tool name")
+        state.name = !state.name || fn.name.startsWith(state.name) ? fn.name : state.name === fn.name ? state.name : state.name + fn.name
+        if (state.name.length > 256) throw new Error("Native tool name too long")
+        this.bytes += Buffer.byteLength(fn.name)
       }
       if (fn.arguments !== undefined) {
         if (typeof fn.arguments === "string") {
-          if (!state.fragmented && Object.keys(state.args).length) throw new Error("Mixed native tool argument encodings")
-          state.args = (state.fragmented ? (state.args as string) : "") + fn.arguments
-          state.fragmented = true
+          if (state.snapshot !== undefined) throw new Error("Mixed native tool argument encodings")
+          state.fragments.push(fn.arguments)
+          this.bytes += Buffer.byteLength(fn.arguments) + 16
         } else {
-          if (state.fragmented) throw new Error("Mixed native tool argument encodings")
-          state.args = { ...(state.args as Json), ...argumentsObject(fn.arguments) }
+          if (state.fragments.length) throw new Error("Mixed native tool argument encodings")
+          const encoded = JSON.stringify(argumentsObject(fn.arguments))
+          // A full argument object closes the call. Different full objects at the
+          // same index are conflicting invocations, not incremental field updates.
+          if (state.snapshot !== undefined && state.snapshot !== encoded) throw new Error("Conflicting complete native tool arguments")
+          state.snapshot = encoded
+          this.bytes += Buffer.byteLength(encoded)
         }
       }
-      if (this.states.reduce((sum, item) => sum + JSON.stringify(item).length, 0) > MAX_FRAME_BYTES) {
-        throw new Error("Native tool payload exceeds its size limit")
-      }
+      if (this.bytes > MAX_FRAME_BYTES) throw new Error("Native tool payload exceeds its size limit")
     }
   }
-
   finish() {
     const ids = new Set<string>()
     return this.states.map((state) => {
       if (!this.allowed.has(state.name) || ids.has(state.id)) throw new Error("Unknown or duplicate native tool call")
       ids.add(state.id)
       return {
-        index: state.index,
-        id: state.id,
-        type: "function" as const,
-        function: { name: state.name, arguments: JSON.stringify(argumentsObject(state.args)) },
+        index: state.index, id: state.id, type: "function" as const,
+        function: { name: state.name, arguments: JSON.stringify(argumentsObject(state.snapshot ?? state.fragments.join(""))) },
       }
     })
   }
 }
-
 function errorResponse(status: number, message: string) {
   return new Response(JSON.stringify({ error: { message, type: "ollama_error", param: null, code: null } }), {
-    status,
-    headers: { "Content-Type": "application/json" },
+    status, headers: { "Content-Type": "application/json" },
   })
 }
-
 function usage(chunk: Json) {
-  const count = (value: unknown) =>
-    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0
+  const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0
   const prompt = count(chunk.prompt_eval_count)
   const completion = count(chunk.eval_count)
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }
 }
-
 function allowedTools(request: Json) {
-  return new Set<string>(
-    (request.tool_choice === "none" ? [] : request.tools ?? []).map((tool: Json) => tool.function.name),
-  )
+  return new Set<string>((request.tool_choice === "none" ? [] : request.tools ?? []).map((tool: Json) => tool.function.name))
 }
-
 function finishReason(chunk: Json, hasTools: boolean) {
   if (chunk.done_reason === "length") return "length"
   return hasTools ? "tool_calls" : "stop"
 }
-
 function delta(chunk: Json): Json {
-  if (chunk.error !== undefined) throw new Error("Ollama reported a generation error")
+  if (chunk.error !== undefined) throw daemonError(chunk.error)
   const message = object(chunk.message) ?? {}
   for (const key of ["content", "thinking"]) {
     if (message[key] !== undefined && typeof message[key] !== "string") throw new Error("Invalid native message")
@@ -292,7 +261,6 @@ function delta(chunk: Json): Json {
     ...(message.thinking ? { reasoning: message.thinking } : {}),
   }
 }
-
 function streamResponse(response: Response, request: Json, signal: AbortSignal, abort: AbortController) {
   const iterator = readNdjson(response.body, signal)
   const encoder = new TextEncoder()
@@ -303,12 +271,8 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
   let cancelled = false
   let finished = false
   const frame = (content: Json, reason: string | null = null, stats?: Json) => ({
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model: request.model,
-    choices: [{ index: 0, delta: content, finish_reason: reason }],
-    ...(stats ? { usage: stats } : {}),
+    id, object: "chat.completion.chunk", created, model: request.model,
+    choices: [{ index: 0, delta: content, finish_reason: reason }], ...(stats ? { usage: stats } : {}),
   })
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -322,10 +286,7 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
           const chunk = next.value
           const content = delta(chunk)
           tools.add(object(chunk.message)?.tool_calls)
-          if (!roleSent) {
-            content.role = "assistant"
-            roleSent = true
-          }
+          if (!roleSent) { content.role = "assistant"; roleSent = true }
           if (Object.keys(content).length) emit(frame(content))
           if (chunk.done === true) {
             const calls = tools.finish()
@@ -353,67 +314,55 @@ function streamResponse(response: Response, request: Json, signal: AbortSignal, 
       await iterator.return(undefined).catch(() => undefined)
     },
   })
-  return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" },
-  })
+  return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" } })
 }
 
 export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): FetchLike {
   const host = normalizeOllamaHost(options.host)
   const base = `${host}/v1/`
   const fetcher = options.fetch ?? fetch
+  const timeout = options.generationTimeoutMs
+  if (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 2147483647)) throw new Error("Invalid explicit Ollama generation timeout")
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
-    if (!url.href.startsWith(base) || url.username || url.password || url.search || url.hash) {
-      return errorResponse(400, "Ollama transport refused a different endpoint")
-    }
+    if (!url.href.startsWith(base) || url.username || url.password || url.search || url.hash) return errorResponse(400, "Ollama transport refused a different endpoint")
     const abort = new AbortController()
     const parent = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-    const configuredTimeout = options.generationTimeoutMs
-    const timeout = Number.isFinite(configuredTimeout)
-      ? Math.min(600000, Math.max(1000, Math.floor(configuredTimeout!)))
-      : 300000
-    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeout), ...(parent ? [parent] : [])])
+    const signal = AbortSignal.any([
+      abort.signal, ...(parent ? [parent] : []), ...(timeout ? [AbortSignal.timeout(timeout)] : []),
+    ])
     checkAbort(signal)
     let headers: Headers
-    try {
-      headers = ollamaHeaders(options)
-    } catch {
-      return errorResponse(400, "Invalid Ollama authentication headers")
-    }
+    try { headers = ollamaHeaders(options) }
+    catch { return errorResponse(400, "Invalid Ollama authentication headers") }
     headers.set("Content-Type", "application/json")
-    if (options.enabled === false || url.href !== `${base}chat/completions`) {
-      return fetcher(input, { ...init, headers, signal, redirect: "error" })
-    }
+    if (options.enabled === false || url.href !== `${base}chat/completions`) return fetcher(input, { ...init, headers, signal, redirect: "error" })
     let request: Json
     let native: ReturnType<typeof openAIToOllamaRequest>
     try {
-      // Consume the supplied body as fetch would. Cloning creates a tee whose other
-      // branch can retain the entire prompt and stall cancellation on error/abort.
       const body = init?.body ?? (input instanceof Request ? input.body : undefined)
       if (!body) throw new Error("A JSON request body is required")
       request = jsonObject(await boundedText(new Response(body).body, signal))
       native = openAIToOllamaRequest(request, options.contexts[request.model], options.keepAlive)
+      if (native.tools?.length && options.toolSupport?.[request.model] === false) {
+        throw daemonError("model does not support tools")
+      }
     } catch (error) {
       checkAbort(signal)
       return errorResponse(400, error instanceof Error ? error.message : "Invalid native request")
     }
     let response: Response
-    try {
-      response = await fetcher(`${host}/api/chat`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(native),
-        signal,
-        redirect: "error",
-      })
-    } catch {
+    const nativeInit: RequestInit & { timeout: false } = {
+      method: "POST", headers, body: JSON.stringify(native), signal, redirect: "error", timeout: false,
+    }
+    try { response = await fetcher(`${host}/api/chat`, nativeInit) }
+    catch {
       checkAbort(signal)
       return errorResponse(502, "Ollama connection failed (redirects are not allowed)")
     }
     if (!response.ok) {
-      void response.body?.cancel().catch(() => undefined)
-      return errorResponse(response.status >= 400 ? response.status : 502, `Ollama returned HTTP ${response.status}`)
+      const error = await responseError(response, signal)
+      return errorResponse(response.status >= 400 ? response.status : 502, error.message)
     }
     if (native.stream) return streamResponse(response, request, signal, abort)
     try {
@@ -425,16 +374,10 @@ export function createOllamaNativeFetch(options: OllamaNativeTransportOptions): 
       const calls = tools.finish()
       if (calls.length && chunk.done_reason === "length") throw new Error("Ollama truncated a tool-call response")
       return Response.json({
-        id: `chatcmpl-${crypto.randomUUID()}`,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: request.model,
+        id: `chatcmpl-${crypto.randomUUID()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: request.model,
         choices: [{
           index: 0,
-          message: {
-            role: "assistant",
-            content: content.content ?? "",
-            ...(content.reasoning ? { reasoning: content.reasoning } : {}),
+          message: { role: "assistant", content: content.content ?? "", ...(content.reasoning ? { reasoning: content.reasoning } : {}),
             ...(calls.length ? { tool_calls: calls.map(({ index: _index, ...call }) => call) } : {}),
           },
           finish_reason: finishReason(chunk, calls.length > 0),

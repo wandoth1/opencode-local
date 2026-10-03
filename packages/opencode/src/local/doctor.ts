@@ -1,23 +1,43 @@
-import type { LocalConfig as Config } from "./runtime"
+import type { LocalConfig } from "./runtime"
 import { OllamaClient } from "./ollama/client"
-import { diagnosticSnapshot, discoverOllama, resolveOllamaSettings, type OllamaDependencies } from "./ollama/integration"
-export interface DoctorArgs { host?: string; model?: string; numCtx?: number; json?: boolean; benchmark?: boolean; outputTokens?: number }
-export async function getDoctorReport(config: Config, globalConfig: Config, args: DoctorArgs, dependencies: OllamaDependencies = {}) {
+import { LocalRuntimeError } from "./ollama/errors"
+import { diagnosticSnapshot, discoverOllama, originalOllamaConfig, resolveOllamaSettings, type OllamaDependencies } from "./ollama/integration"
+
+export interface DoctorArgs {
+  host?: string
+  model?: string
+  numCtx?: number
+  json?: boolean
+  benchmark?: boolean
+  outputTokens?: number
+  benchmarkTimeoutMs?: number
+}
+
+export async function getDoctorReport(config: LocalConfig, globalConfig: LocalConfig, args: DoctorArgs, dependencies: OllamaDependencies = {}) {
   for (const [name, value] of [["num-ctx", args.numCtx], ["output-tokens", args.outputTokens]] as const) {
-    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new Error(`--${name} must be a positive integer`)
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new LocalRuntimeError(`--${name} must be a positive integer`)
   }
-  const settings = resolveOllamaSettings(config, globalConfig, args)
-  const snapshot = await discoverOllama(config, settings, dependencies)
-  if (!snapshot) throw new Error("Ollama is disabled, unavailable, or has no usable chat models")
-  const preferred = (config as unknown as { model?: string }).model
-  const model = args.model ?? (preferred?.startsWith("ollama/") ? preferred.slice("ollama/".length) : undefined) ?? Object.keys(snapshot.models)[0]
-  if (!Object.hasOwn(snapshot.models, model)) throw new Error("The selected Ollama model was not found")
+  if (args.benchmarkTimeoutMs !== undefined && (!Number.isSafeInteger(args.benchmarkTimeoutMs) || args.benchmarkTimeoutMs < 0 || args.benchmarkTimeoutMs > 2147483647)) {
+    throw new LocalRuntimeError("--benchmark-timeout-ms must be zero or positive milliseconds up to 2147483647")
+  }
+  const source = originalOllamaConfig(config)
+  const preferred = typeof source.model === "string" && source.model.startsWith("ollama/") ? source.model.slice(7) : undefined
+  const selected = args.model ?? preferred
+  if (args.benchmark && !selected) throw new LocalRuntimeError("Benchmark requires --model or an explicit ollama/ model in configuration; no model will be loaded implicitly.")
+  const settings = resolveOllamaSettings(source, globalConfig, args)
+  const snapshot = await discoverOllama(source, settings, dependencies, true)
+  if (!snapshot) throw new LocalRuntimeError("Ollama is disabled, unavailable, or has no usable chat models")
+  const model = selected ?? Object.keys(snapshot.models)[0]
+  if (!Object.hasOwn(snapshot.models, model)) throw new LocalRuntimeError("The selected Ollama model was not found")
   let benchmark
   if (args.benchmark) {
     const client = new OllamaClient({ ...settings, fetch: dependencies.fetch })
-    const result = await client.benchmark({ model, contextTokens: snapshot.models[model].limit.context,
-      outputTokens: args.outputTokens ?? 96, keepAlive: settings.keepAlive })
-    // Generated sample text is deliberately excluded from public diagnostics.
+    const timeout = args.benchmarkTimeoutMs ?? settings.generationTimeoutMs ?? (typeof settings.timeout === "number" ? settings.timeout : 0)
+    const result = await client.benchmark({
+      model, contextTokens: snapshot.models[model].limit.context,
+      outputTokens: args.outputTokens ?? 96, keepAlive: settings.keepAlive,
+      signal: timeout ? AbortSignal.timeout(timeout) : undefined,
+    })
     const { sample: _sample, ...metrics } = result
     benchmark = metrics
   }

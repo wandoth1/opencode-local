@@ -1,0 +1,2 @@
+# Used by the Node source launcher, not by arbitrary project Bun configuration.
+env = false

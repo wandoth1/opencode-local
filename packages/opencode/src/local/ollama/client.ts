@@ -1,6 +1,7 @@
 import { finitePositive, type LocalModelMetadata } from "../runtime"
 import { extractContextLength } from "../context-budget"
 import { boundedText, checkAbort, jsonObject, object, readNdjson } from "./io"
+import { daemonError, LocalRuntimeError, responseError } from "./errors"
 
 export interface OllamaModelDetails {
   parent_model?: string
@@ -35,7 +36,11 @@ export interface OllamaRunningModel extends OllamaTagModel {
 }
 export interface OllamaPsResponse { models?: OllamaRunningModel[] }
 export interface OllamaVersionResponse { version?: string }
-export interface OllamaDiscoveryModel { tag: OllamaTagModel; show?: OllamaShowResponse; metadata: LocalModelMetadata }
+export interface OllamaDiscoveryModel {
+  tag: OllamaTagModel
+  show?: OllamaShowResponse
+  metadata: LocalModelMetadata
+}
 export interface OllamaClientOptions {
   host?: string
   apiKey?: string
@@ -59,27 +64,36 @@ export interface OllamaBenchmarkResult {
 }
 
 export function normalizeOllamaHost(raw?: string): string {
-  const source = (raw ?? "http://127.0.0.1:11434").trim()
+  const source = raw?.trim() || "http://127.0.0.1:11434"
+  const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(source)
+  const input = source === "ollama.com" ? "https://ollama.com" : source
+  // Bare IPv6 addresses have no unambiguous port; use brackets for an explicit port.
+  const bareIpv6 = !explicitScheme && !input.startsWith("[") && (input.match(/:/g)?.length ?? 0) > 1
   let url: URL
   try {
-    url = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(source) ? source : `http://${source}`)
+    url = new URL(explicitScheme || input.startsWith("https://") ? input : `http://${bareIpv6 ? `[${input}]` : input}`)
   } catch {
-    throw new Error("Invalid Ollama endpoint")
+    throw new LocalRuntimeError("Invalid Ollama endpoint. Use a hostname and optional port, or an HTTP(S) URL.")
   }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error("Ollama endpoints require HTTP(S) without embedded credentials, query or fragment")
+    throw new LocalRuntimeError("Ollama endpoints require HTTP(S) without embedded credentials, query or fragment")
   }
+  // Host() defaults bare hosts to 11434, but explicit HTTP(S) URLs use 80/443.
+  if (!explicitScheme && source !== "ollama.com" && !url.port) {
+    // URL normalizes an explicit :80 to an empty port; do not replace it.
+    const authority = source.split("/")[0]
+    if (!/\]:\d+$/.test(authority) && !(authority.split(":").length === 2 && /:\d+$/.test(authority))) url.port = "11434"
+  }
+  if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1"
+  if (url.hostname === "[::]") url.hostname = "[::1]"
   url.pathname = url.pathname.replace(/\/(?:v1|api)\/?$/i, "").replace(/\/+$/, "") || "/"
   return url.toString().replace(/\/$/, "")
 }
 
-export function ollamaOpenAIBaseURL(host: string) {
-  return `${normalizeOllamaHost(host)}/v1`
-}
-
+export function ollamaOpenAIBaseURL(host: string) { return `${normalizeOllamaHost(host)}/v1` }
 export function isLoopbackOllamaHost(host: string) {
   const name = new URL(normalizeOllamaHost(host)).hostname.toLowerCase()
-  return name === "localhost" || name === "127.0.0.1" || name === "[::1]"
+  return name === "localhost" || /^127\.\d+\.\d+\.\d+$/.test(name) || name === "[::1]"
 }
 
 export function ollamaHeaders(options: Pick<OllamaClientOptions, "apiKey" | "headers">) {
@@ -90,27 +104,20 @@ export function ollamaHeaders(options: Pick<OllamaClientOptions, "apiKey" | "hea
     headers.set("Accept", "application/json")
     return headers
   } catch {
-    // Native Headers errors can include the rejected value, which may be a secret.
-    throw new Error("Invalid Ollama authentication headers")
+    throw new LocalRuntimeError("Invalid Ollama authentication headers")
   }
 }
 
 function signalWithTimeout(timeoutMs: number, parent?: AbortSignal) {
   return parent ? AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
 }
-
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []
 }
-
-function text(value: unknown) {
-  return typeof value === "string" ? value : undefined
-}
-
+function text(value: unknown) { return typeof value === "string" ? value : undefined }
 function nonnegative(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
-
 function rate(count: number | undefined, ns: unknown) {
   const duration = finitePositive(ns)
   return count !== undefined && count > 0 && duration ? count * 1e9 / duration : undefined
@@ -119,6 +126,7 @@ function rate(count: number | undefined, ns: unknown) {
 export class OllamaClient {
   readonly host: string
   readonly openAIBaseURL: string
+  readonly warnings: string[] = []
   private readonly fetcher: NonNullable<OllamaClientOptions["fetch"]>
   private readonly timeout: number
 
@@ -126,7 +134,7 @@ export class OllamaClient {
     this.host = normalizeOllamaHost(options.host)
     this.openAIBaseURL = ollamaOpenAIBaseURL(this.host)
     this.fetcher = options.fetch ?? fetch
-    this.timeout = Math.min(30000, Math.max(100, Math.floor(finitePositive(options.timeoutMs) ?? 1500)))
+    this.timeout = Math.min(30000, Math.max(100, Math.floor(finitePositive(options.timeoutMs) ?? 5000)))
   }
 
   private async request(path: string, body?: unknown, parent?: AbortSignal) {
@@ -144,77 +152,82 @@ export class OllamaClient {
       })
     } catch {
       checkAbort(signal)
-      throw new Error("Ollama connection failed (redirects are not allowed)")
+      throw new LocalRuntimeError("Ollama connection failed. Check the endpoint and that the daemon is running; redirects are not allowed.")
     }
-    if (!response.ok) {
-      void response.body?.cancel().catch(() => undefined)
-      throw new Error(`Ollama request failed (HTTP ${response.status})`)
-    }
+    if (!response.ok) throw await responseError(response, signal)
     return jsonObject(await boundedText(response.body, signal))
   }
 
   async version(): Promise<string | undefined> {
-    return text((await this.request("/api/version")).version)
+    const version = text((await this.request("/api/version")).version)
+    return version?.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "").slice(0, 128)
   }
-
   async available() {
     try { return Boolean(await this.version()) } catch { return false }
   }
-
   async tags(): Promise<OllamaTagModel[]> {
     const raw = await this.request("/api/tags")
-    if (!Array.isArray(raw.models)) throw new Error("Invalid Ollama model list")
-    if (raw.models.length > 256) throw new Error("Ollama discovery supports at most 256 models; configure a selection manually")
+    if (!Array.isArray(raw.models)) throw new LocalRuntimeError("Invalid Ollama model list")
+    if (raw.models.length > 256) throw new LocalRuntimeError("Ollama discovery supports at most 256 models; configure a selection manually")
     return raw.models.map((value: unknown) => {
       const tag = object(value)
       if (!tag || typeof tag.name !== "string" || !tag.name || (tag.model !== undefined && typeof tag.model !== "string")) {
-        throw new Error("Invalid Ollama model entry")
+        throw new LocalRuntimeError("Invalid Ollama model entry")
       }
       return tag as OllamaTagModel
     })
   }
-
   async show(model: string, signal?: AbortSignal): Promise<OllamaShowResponse> {
-    return this.request("/api/show", { model }, signal)
+    const response = await this.request("/api/show", { model }, signal)
+    if (response.capabilities !== undefined && (!Array.isArray(response.capabilities) || response.capabilities.some((entry: unknown) => typeof entry !== "string"))) {
+      throw new LocalRuntimeError("Invalid Ollama model capabilities")
+    }
+    return response
   }
-
   async running(): Promise<OllamaRunningModel[]> {
     const raw = await this.request("/api/ps")
-    if (!Array.isArray(raw.models)) throw new Error("Invalid Ollama running-model list")
+    if (!Array.isArray(raw.models)) throw new LocalRuntimeError("Invalid Ollama running-model list")
     return raw.models.filter((value: unknown) => typeof object(value)?.name === "string") as OllamaRunningModel[]
   }
 
-  async discover(concurrency = 4): Promise<OllamaDiscoveryModel[]> {
-    const tags = await this.tags()
+  async describe(tag: OllamaTagModel, signal?: AbortSignal): Promise<OllamaDiscoveryModel> {
+    const id = tag.model || tag.name
+    const show = await this.show(id, signal)
+    const details = { ...object(tag.details), ...object(show.details) }
+    const info = object(show.model_info) ?? {}
+    return {
+      tag,
+      show,
+      metadata: {
+        id,
+        family: text(details.family),
+        families: strings(details.families),
+        format: text(details.format),
+        parameterSize: text(details.parameter_size),
+        quantization: text(details.quantization_level),
+        fileSizeBytes: finitePositive(tag.size) ?? 0,
+        contextLength: extractContextLength(info, text(show.parameters)),
+        capabilities: strings(show.capabilities),
+        modelInfo: info,
+      },
+    }
+  }
+
+  async discover(concurrency = 4, selected?: OllamaTagModel[]): Promise<OllamaDiscoveryModel[]> {
+    const tags = selected ?? await this.tags()
     const result: OllamaDiscoveryModel[] = []
-    const deadline = signalWithTimeout(8000)
+    const deadline = signalWithTimeout(15000)
     let cursor = 0
     const worker = async () => {
       while (cursor < tags.length) {
         const tag = tags[cursor++]
-        const id = tag.model || tag.name
-        let show: OllamaShowResponse | undefined
-        if (!deadline.aborted) {
-          try { show = await this.show(id, deadline) } catch { /* A partial model list is still usable. */ }
+        try {
+          checkAbort(deadline)
+          result.push(await this.describe(tag, deadline))
+        } catch {
+          // Never advertise guessed capabilities when introspection failed.
+          this.warnings.push("A model was omitted because /api/show failed or timed out. Increase discoveryTimeoutMs or inspect it explicitly.")
         }
-        const details = { ...object(tag.details), ...object(show?.details) }
-        const info = object(show?.model_info) ?? {}
-        result.push({
-          tag,
-          show,
-          metadata: {
-            id,
-            family: text(details.family),
-            families: strings(details.families),
-            format: text(details.format),
-            parameterSize: text(details.parameter_size),
-            quantization: text(details.quantization_level),
-            fileSizeBytes: finitePositive(tag.size) ?? 0,
-            contextLength: extractContextLength(info, text(show?.parameters)),
-            capabilities: strings(show?.capabilities),
-            modelInfo: info,
-          },
-        })
       }
     }
     const workers = Math.min(8, Math.max(1, Math.floor(finitePositive(concurrency) ?? 4)), tags.length)
@@ -230,68 +243,59 @@ export class OllamaClient {
     keepAlive?: string
     signal?: AbortSignal
   }): Promise<OllamaBenchmarkResult> {
-    if (!Number.isSafeInteger(input.contextTokens) || input.contextTokens < 2) throw new Error("Benchmark context must be at least 2 tokens")
+    if (!Number.isSafeInteger(input.contextTokens) || input.contextTokens < 2) throw new LocalRuntimeError("Benchmark context must be at least 2 tokens")
     const output = input.outputTokens ?? 96
-    if (!Number.isSafeInteger(output) || output < 1) throw new Error("Benchmark output must be a positive integer")
+    if (!Number.isSafeInteger(output) || output < 1) throw new LocalRuntimeError("Benchmark output must be a positive integer")
     const started = performance.now()
     let first: number | undefined
     let sample = ""
     let final: Record<string, unknown> | undefined
-    const signal = signalWithTimeout(120000, input.signal)
+    const signal = input.signal
     const headers = ollamaHeaders(this.options)
     headers.set("Content-Type", "application/json")
+    const init: RequestInit & { timeout: false } = {
+      method: "POST",
+      redirect: "error",
+      headers,
+      signal,
+      timeout: false,
+      body: JSON.stringify({
+        model: input.model,
+        stream: true,
+        keep_alive: input.keepAlive,
+        truncate: false,
+        shift: false,
+        messages: [{ role: "user", content: input.prompt ?? "Return a compact TypeScript function that adds two numbers. Do not call tools." }],
+        options: { num_ctx: input.contextTokens, num_predict: Math.min(output, input.contextTokens - 1), temperature: 0 },
+      }),
+    }
     let response: Response
-    try {
-      response = await this.fetcher(`${this.host}/api/chat`, {
-        method: "POST",
-        redirect: "error",
-        headers,
-        signal,
-        body: JSON.stringify({
-          model: input.model,
-          stream: true,
-          keep_alive: input.keepAlive ?? "5m",
-          truncate: false,
-          shift: false,
-          messages: [{
-            role: "user",
-            content: input.prompt ?? "Return a compact TypeScript function that adds two numbers. Do not call tools.",
-          }],
-          options: { num_ctx: input.contextTokens, num_predict: Math.min(output, input.contextTokens - 1), temperature: 0 },
-        }),
-      })
-    } catch {
+    try { response = await this.fetcher(`${this.host}/api/chat`, init) }
+    catch {
       checkAbort(signal)
-      throw new Error("Ollama benchmark connection failed")
+      throw new LocalRuntimeError("Ollama benchmark connection failed")
     }
-    if (!response.ok) {
-      void response.body?.cancel().catch(() => undefined)
-      throw new Error(`Ollama benchmark failed (HTTP ${response.status})`)
-    }
+    if (!response.ok) throw await responseError(response, signal)
     for await (const chunk of readNdjson(response.body, signal)) {
-      if (chunk.error !== undefined) throw new Error("Ollama benchmark returned an error")
+      if (chunk.error !== undefined) throw daemonError(chunk.error)
       const message = object(chunk.message)
       const emitted = [message?.thinking, message?.content]
-        .filter((value): value is string => typeof value === "string" && value.length > 0)
-        .join("")
+        .filter((value): value is string => typeof value === "string" && value.length > 0).join("")
       if (emitted && first === undefined) first = performance.now()
       if (sample.length < 500) sample += emitted.slice(0, 500 - sample.length)
       if (chunk.done === true) { final = chunk; break }
     }
     if (!final || first === undefined || !sample || !finitePositive(final.eval_count)) {
-      throw new Error("Benchmark produced no valid completed output")
+      throw new LocalRuntimeError("Benchmark produced no valid completed output")
     }
     const total = nonnegative(final.total_duration)
     const load = nonnegative(final.load_duration)
     const prompt = nonnegative(final.prompt_eval_count)
     const cached = nonnegative(final.prompt_eval_cached_count)
-    // Current Ollama reports total prompt tokens but times only uncached evaluation.
-    // An impossible cache count or a fully cached prompt cannot establish prefill speed.
-    const evaluated = prompt === undefined || (cached !== undefined && cached > prompt)
-      ? undefined
-      : prompt - (cached ?? 0)
+    // Ollama 0.32.14 does not emit a cache count. Unknown is not zero.
+    const evaluated = prompt === undefined || cached === undefined || cached > prompt ? undefined : prompt - cached
     const tokens = nonnegative(final.eval_count)
-    if (!tokens) throw new Error("Benchmark returned an invalid output token count")
+    if (!tokens) throw new LocalRuntimeError("Benchmark returned an invalid output token count")
     return {
       model: input.model,
       contextTokens: input.contextTokens,
