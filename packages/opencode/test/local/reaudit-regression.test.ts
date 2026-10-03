@@ -54,8 +54,8 @@ async function withEnv(values: Record<string, string | undefined>, callback: () 
 test("B1: busy and empty 5070 budgets never shrink the agent default to 4K", async () => withEnv({}, async () => {
   for (const free of [0, 1.2, 11.5]) {
     const snapshot = await discoverOllama({}, undefined, { fetch: fixture, hardware: () => hardware(free) })
-    expect(snapshot?.models.fixture.limit.context).toBe(16384)
-    expect(snapshot?.models.fixture.limit.output).toBe(4096)
+    expect(snapshot?.models.fixture.limit.context).toBe(32768)
+    expect(snapshot?.models.fixture.limit.output).toBe(8192)
     expect(snapshot?.profiles.fixture.context.confidence).not.toBe("high")
   }
 }))
