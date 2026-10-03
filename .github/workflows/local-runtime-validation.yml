@@ -39,13 +39,12 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
-      # Validate the agent and its workspace dependency graph, not upstream's
-      # unrelated hosted console, whose preview SolidStart tarball can expire.
-      # Keep the original lockfile, pinned versions and all tests unchanged.
-      - name: Install locked agent dependencies
+      # Include root tooling/types and the agent's dependency graph. The hosted
+      # console is not part of this milestone and uses an expiring preview tarball.
+      - name: Install locked agent and root tooling dependencies
         id: install
         timeout-minutes: 10
-        run: bun install --frozen-lockfile --filter './packages/opencode'
+        run: bun install --frozen-lockfile --filter './' --filter './packages/opencode'
       - name: Verify lockfile remains unchanged
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: git diff --exit-code -- bun.lock
