@@ -13,14 +13,27 @@ export function jsonObject(text: string): Json {
   if (!result) throw new Error("Ollama JSON must be an object")
   return result
 }
-// Worded to stay outside the core's retryable-message patterns (session/retry.ts):
-// an explicit total deadline that expired would expire again on every retry.
+// Both messages are worded to stay outside the core's retryable-message patterns
+// (session/retry.ts): a total deadline that expired would expire again on every
+// retry. Do not interpolate the millisecond value; digits such as 500 match them.
 export const GENERATION_DEADLINE_MESSAGE =
   "Ollama generation deadline reached (generationTimeoutMs): the model did not finish within the configured limit. Raise or disable the limit."
+export const REQUEST_DEADLINE_MESSAGE =
+  "Ollama request deadline reached: a configured timeout expired before the daemon finished."
 export function checkAbort(signal?: AbortSignal | null) {
   if (!signal?.aborted) return
-  if (signal.reason instanceof Error && signal.reason.name === "TimeoutError") {
-    throw new DOMException(GENERATION_DEADLINE_MESSAGE, "TimeoutError")
+  const reason: unknown = signal.reason
+  if (reason instanceof Error) {
+    // The core's own header-timeout error keeps its identity so the core handles it as usual.
+    if (reason.name === "ProviderHeaderTimeoutError") throw reason
+    // Only the transport's own timer may name generationTimeoutMs; any other
+    // timeout (provider `timeout`, discovery, benchmark) gets the generic text.
+    if (reason.name === "TimeoutError") {
+      throw new DOMException(
+        reason.message === GENERATION_DEADLINE_MESSAGE ? GENERATION_DEADLINE_MESSAGE : REQUEST_DEADLINE_MESSAGE,
+        "TimeoutError",
+      )
+    }
   }
   throw new DOMException("Local runtime request aborted", "AbortError")
 }

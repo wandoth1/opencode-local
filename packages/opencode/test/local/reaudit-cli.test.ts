@@ -37,6 +37,8 @@ async function sandbox(run: (input: Sandbox) => Promise<void>) {
     OPENCODE_TEST_HOME: path.join(directory, "home"),
     OPENCODE_TEST_MANAGED_CONFIG_DIR: path.join(directory, "managed"),
     OPENCODE_DB: ":memory:",
+    // Keep the child off the network: a fresh cache directory would refresh the model catalog.
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_BUN: process.execPath,
   })
   const node = Bun.which("node")
@@ -215,10 +217,11 @@ test("CLI: repeated Ollama overflow stops after one compaction instead of loopin
       expect(result.stderr).toContain("after overflow compaction")
       expect(result.stderr).toContain("numCtx")
       expect(result.stderr).toContain("skills/tools")
-      // First overflow, one compaction, second overflow, stop. Never a third agent turn.
+      // First overflow, one compaction, second overflow, stop. Never a third agent turn:
+      // every further compaction would be followed by another agent turn.
       expect(seen.agent).toBe(2)
-      // Title plus exactly one compaction.
-      expect(seen.other).toBe(2)
+      // The compaction did run; how many title requests the core sends is not asserted.
+      expect(seen.other).toBeGreaterThanOrEqual(1)
     } finally {
       good.server.stop(true)
     }

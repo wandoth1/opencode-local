@@ -31,7 +31,7 @@ afterAll(async () => {
   }
 
   // Windows can keep SQLite WAL handles alive until GC finalizers run, so we
-  // force GC and retry teardown to avoid flaky EBUSY in test cleanup.
+  // force GC and retry teardown to avoid flaky EBUSY/EFAULT in test cleanup.
   await rm(30)
 })
 

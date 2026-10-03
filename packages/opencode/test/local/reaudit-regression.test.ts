@@ -4,8 +4,9 @@ import { recommendContext, estimateKvBytesPerToken } from "@/local/context-budge
 import { OllamaClient, normalizeOllamaHost } from "@/local/ollama/client"
 import { configureOllama, discoverOllama, resolveOllamaSettings } from "@/local/ollama/integration"
 import { createOllamaNativeFetch, type FetchLike } from "@/local/ollama/transport"
-import { checkAbort, GENERATION_DEADLINE_MESSAGE } from "@/local/ollama/io"
+import { checkAbort, GENERATION_DEADLINE_MESSAGE, REQUEST_DEADLINE_MESSAGE } from "@/local/ollama/io"
 import { SessionRetry } from "@/session/retry"
+import { ProviderError } from "@/provider/error"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { getDoctorReport } from "@/local/doctor"
 import { parseCudaVersion } from "@/local/hardware"
@@ -161,6 +162,10 @@ test("H1: common daemon failures map to actionable canonical messages without ec
     [400, '"gemma3:4b" does not support thinking PRIVATE_FIXTURE', "does not support thinking"],
     [500, "this model only supports one image while more than one image requested PRIVATE_FIXTURE", "cannot accept the attached images"],
     [500, "llama runner process has terminated: exit status 2 PRIVATE_FIXTURE", "runner stopped unexpectedly"],
+    [500, "model runner has unexpectedly stopped, this may be due to resource limitations or an internal error PRIVATE_FIXTURE", "runner stopped unexpectedly"],
+    // Near misses must stay unclassified rather than borrow a specific message.
+    [500, "timed out waiting for llama runner to start PRIVATE_FIXTURE", "Ollama returned HTTP 500"],
+    [400, "this endpoint does not support revisions PRIVATE_FIXTURE", "Ollama returned HTTP 400"],
     [400, "invalid options: num_gpu PRIVATE_FIXTURE", "rejected a generation option"],
     [500, "model requires more system memory (21.3 GiB) than is available (9.8 GiB) PRIVATE_FIXTURE", "could not allocate enough memory"],
     [404, 'model "nope" not found, try pulling it first PRIVATE_FIXTURE', "was not found"],
@@ -192,17 +197,42 @@ test("H2: TimeoutError is distinct from user cancellation and never echoes the a
   cancel.abort("private-reason")
   expect(() => checkAbort(cancel.signal)).toThrow("aborted")
 })
-test("H2: an expired explicit deadline is not retried by the core's message classifier", () => {
-  const timeout = new AbortController()
-  timeout.abort(new DOMException("deadline", "TimeoutError"))
-  try { checkAbort(timeout.signal); throw new Error("did not throw") }
-  catch (error) {
-    expect((error as Error).message).toBe(GENERATION_DEADLINE_MESSAGE)
-    // The session wraps this DOMException as an Unknown error and retries by message.
-    expect(SessionRetry.retryable(new NamedError.Unknown({ message: (error as Error).message }).toObject(), "ollama")).toBeUndefined()
-  }
+test("H2: expired deadlines name the right setting and are not retried by the core's message classifier", () => {
+  const retried = (message: string) => SessionRetry.retryable(new NamedError.Unknown({ message }).toObject(), "ollama")
+  // The transport's own timer is the only source allowed to name generationTimeoutMs.
+  const own = new AbortController()
+  own.abort(new DOMException(GENERATION_DEADLINE_MESSAGE, "TimeoutError"))
+  expect(() => checkAbort(own.signal)).toThrow(GENERATION_DEADLINE_MESSAGE)
+  // Any other timeout, such as the provider's `timeout` option, must not blame that setting.
+  const other = new AbortController()
+  other.abort(new DOMException("The operation timed out.", "TimeoutError"))
+  expect(() => checkAbort(other.signal)).toThrow(REQUEST_DEADLINE_MESSAGE)
+  expect(REQUEST_DEADLINE_MESSAGE).not.toContain("generationTimeoutMs")
+  // The session wraps these as Unknown errors and retries by message.
+  expect(retried(GENERATION_DEADLINE_MESSAGE)).toBeUndefined()
+  expect(retried(REQUEST_DEADLINE_MESSAGE)).toBeUndefined()
   // Guard the premise: the previous wording was retried five times with backoff.
-  expect(SessionRetry.retryable(new NamedError.Unknown({ message: "Local runtime request timed out at the configured deadline" }).toObject(), "ollama")).toBeDefined()
+  expect(retried("Local runtime request timed out at the configured deadline")).toBeDefined()
+})
+test("H2: the core's header-timeout error keeps its identity through the transport", () => {
+  const reason = new ProviderError.HeaderTimeoutError(1234)
+  const header = new AbortController()
+  header.abort(reason)
+  expect(() => checkAbort(header.signal)).toThrow(reason)
+})
+test("H2: a provider `timeout` that expires mid-request does not blame generationTimeoutMs", async () => {
+  const native = createOllamaNativeFetch({ host, contexts: { fixture: 32768 }, fetch: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })
+  }) })
+  // Stands in for the core's own timeout signal. AbortSignal.timeout() is avoided here:
+  // under `bun test` on Windows it never fires when nothing else is pending, and stalls the runner.
+  const parent = new AbortController()
+  const timer = setTimeout(() => parent.abort(new DOMException("The operation timed out.", "TimeoutError")), 30)
+  try {
+    await expect(native(endpoint, { method: "POST", body: JSON.stringify(payload()), signal: parent.signal })).rejects.toThrow(REQUEST_DEADLINE_MESSAGE)
+  } finally {
+    clearTimeout(timer)
+  }
 })
 test("H2: explicit deadline survives integration and standard core timeout controls are preserved", async () => withEnv({}, async () => {
   const cfg: LocalConfig = config({ generationTimeoutMs: 200, timeout: false, chunkTimeout: 60000, headerTimeout: 90000 })
