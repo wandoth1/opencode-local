@@ -4,7 +4,7 @@
 
 Imported upstream: `b155b15694dbcc6768f11d2f25cc2bdd1f738ab4`. The first static audit examined `a3a05dd538d4bf84b7921c8464950a74622c394b`. The second audit ran the real agent on Windows/Ollama/RTX 5070 against `0b4b6fc76b1636760c9fa795f01e6490604adad6`. Although that revision passed 84 local tests and 102 provider tests, the physical audit found material defects. Those green results are not evidence that the current corrections work.
 
-The failed archive-based attempts are historical failures, not implemented fixes. All current corrections are ordinary source files on `feature/local-foundation`. Record the exact HEAD, base and actual CI checkout before reviewing. PR #1 remains draft and must not be merged on the strength of an old report.
+The failed archive-based attempts are historical failures, not implemented fixes. All current corrections are ordinary source files, developed on `feature/local-foundation` and merged into `dev` through PR #1. Record the exact HEAD, base and actual CI checkout before reviewing. PR #1 remains draft and must not be merged on the strength of an old report.
 
 ## Current correction ledger
 
