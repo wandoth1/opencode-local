@@ -54,9 +54,9 @@ jobs:
         run: bun run typecheck
       - name: Local runtime regression and SDK contract tests
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        # Includes a deliberate 305-second HTTP test. Ten minutes allows setup
+        # Includes a deliberate 305-second HTTP test. Twelve minutes allows setup
         # and Windows subprocess tests, but fails rather than hanging forever.
-        timeout-minutes: 10
+        timeout-minutes: 12
         working-directory: packages/opencode
         run: bun test test/local --timeout 30000
       - name: Existing provider regression tests

@@ -18,6 +18,17 @@ if (!path.isAbsolute(executable)) {
   process.exit(1)
 }
 
+// Launcher-only switch, consumed here and never passed to the agent. `--low` as the
+// first argument (or OPENCODE_LOCAL_LOW=1) starts with a smaller base prompt for large
+// or partially offloaded local models: skills discovered from other tools' folders
+// (.claude/skills and .agents/skills, in the home directory and inside the project)
+// are not listed. Skills in OpenCode's own locations still load, so a short curated
+// set can be kept there.
+const args = process.argv.slice(2)
+const lowFlag = args[0] === "--low"
+if (lowFlag) args.shift()
+const low = lowFlag || ["1", "true", "yes", "on"].includes((process.env.OPENCODE_LOCAL_LOW ?? "").trim().toLowerCase())
+
 const cwd = process.cwd()
 const entry = fileURLToPath(new URL("../packages/opencode/src/index.ts", import.meta.url))
 // Resolve the conditional Bun export inside Bun, not through Node's resolver.
@@ -29,6 +40,7 @@ const environment = Object.fromEntries(
 // Upstream `run` uses PWD for its local server. A subprocess cwd does not update
 // inherited PWD; carrying the parent's value can select the wrong project.
 environment.PWD = cwd
+if (low) environment.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1"
 
 const child = spawn(executable, [
   "run",
@@ -38,7 +50,7 @@ const child = spawn(executable, [
   "--conditions=browser",
   `--preload=${preload}`,
   entry,
-  ...process.argv.slice(2),
+  ...args,
 ], {
   cwd,
   stdio: "inherit",

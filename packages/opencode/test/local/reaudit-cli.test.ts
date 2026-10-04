@@ -26,7 +26,9 @@ async function sandbox(run: (input: Sandbox) => Promise<void>) {
     if (
       key.startsWith("OPENCODE_OLLAMA_") ||
       key.startsWith("OPENCODE_CONFIG") ||
-      ["OLLAMA_HOST", "OPENCODE_LOCAL_DISABLE", "BUN_OPTIONS", "OPENCODE_DISABLE_DEFAULT_PLUGINS"].includes(key)
+      // A developer's own switches (low mode, disabled skills or project config) must not change what these tests see.
+      key.startsWith("OPENCODE_DISABLE_") ||
+      ["OLLAMA_HOST", "OPENCODE_LOCAL_DISABLE", "OPENCODE_LOCAL_LOW", "BUN_OPTIONS"].includes(key)
     ) delete environment[key]
   }
   Object.assign(environment, {
@@ -256,6 +258,56 @@ test("CLI: a successful turn resets the Ollama overflow counter", async () => {
     }
   })
 }, 45000)
+
+test("CLI: --low drops skills from other tools' folders and keeps OpenCode's own", async () => {
+  await sandbox(async ({ project, writeGlobal, command }) => {
+    const home = path.join(path.dirname(project), "home")
+    const skill = async (directory: string, name: string, marker: string) => {
+      await fs.mkdir(path.join(directory, name), { recursive: true })
+      await fs.writeFile(path.join(directory, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${marker}\n---\n\nFixture skill.\n`)
+    }
+    await skill(path.join(home, ".claude", "skills"), "external-claude", "EXTERNAL_CLAUDE_MARKER")
+    await skill(path.join(home, ".agents", "skills"), "external-agents", "EXTERNAL_AGENTS_MARKER")
+    // The project's own .claude folder is an external location too, not only the home one.
+    await skill(path.join(project, ".claude", "skills"), "external-project", "EXTERNAL_PROJECT_MARKER")
+    await skill(path.join(project, ".opencode", "skills"), "native-project", "NATIVE_PROJECT_MARKER")
+    const names = (result: CommandResult) => {
+      expect({ code: result.code, stderr: result.code ? result.stderr : "" }).toEqual({ code: 0, stderr: "" })
+      return (JSON.parse(result.stdout) as Array<{ name: string }>).map((item) => item.name)
+    }
+    const external = ["external-claude", "external-agents", "external-project"]
+
+    const normal = names(await command(["debug", "skill"]))
+    for (const name of [...external, "native-project"]) expect(normal).toContain(name)
+
+    for (const result of [
+      await command(["--low", "debug", "skill"]),
+      await command(["debug", "skill"], { OPENCODE_LOCAL_LOW: "1" }),
+    ]) {
+      const low = names(result)
+      expect(low).toContain("native-project")
+      for (const name of external) expect(low).not.toContain(name)
+    }
+
+    // The switch must reach the prompt the daemon actually receives, not only the listing.
+    const prompts: string[] = []
+    const good = daemon(async (request) => {
+      const body = await request.json() as ChatBody & { messages: Array<{ role: string; content: string }> }
+      if (body.tools?.length) prompts.push(body.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n"))
+      return frames({ role: "assistant", content: "OK" })
+    })
+    try {
+      await writeGlobal({ model: "ollama/fixture", small_model: "ollama/fixture", provider: { ollama: { options: { host: good.host } } } })
+      const result = await command(["--low", "run", "--model", "ollama/fixture", "Reply OK"])
+      expect({ code: result.code, stderr: result.code ? result.stderr : "" }).toEqual({ code: 0, stderr: "" })
+      expect(prompts.length).toBeGreaterThan(0)
+      expect(prompts[0]).toContain("NATIVE_PROJECT_MARKER")
+      for (const marker of ["EXTERNAL_CLAUDE_MARKER", "EXTERNAL_AGENTS_MARKER", "EXTERNAL_PROJECT_MARKER"]) expect(prompts[0]).not.toContain(marker)
+    } finally {
+      good.server.stop(true)
+    }
+  })
+}, 150000)
 
 test("CLI: actual agent reads the selected project's file despite a stale inherited PWD", async () => {
   await sandbox(async ({ project, writeGlobal, command }) => {

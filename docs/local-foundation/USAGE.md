@@ -1,13 +1,13 @@
 # Running OpenCode Local from reviewed source
 
-This is an unofficial experimental OpenCode fork. Use `feature/local-foundation`, not an upstream installer. The RTX 5070 is the target, not a demonstrated acceleration claim. See [the second-audit correction ledger](REAUDIT_FIXES.md).
+This is an unofficial experimental OpenCode fork. Use this repository's default branch `dev` or a release tag, not an upstream installer. The RTX 5070 is the target, not a demonstrated acceleration claim. See [the second-audit correction ledger](REAUDIT_FIXES.md).
 
 ## Install and launch
 
 Use Node 22 or newer and pinned Bun 1.3.14. Review install scripts before installing into a trusted checkout.
 
 ```bash
-git clone --single-branch --branch feature/local-foundation https://github.com/wandoth1/opencode-local.git
+git clone https://github.com/wandoth1/opencode-local.git
 cd opencode-local
 bun install --frozen-lockfile --filter './' --filter './packages/opencode'
 node scripts/opencode-local.mjs local doctor --json
@@ -23,6 +23,28 @@ node D:\githubs\opencode-local\scripts\opencode-local.mjs
 ```
 
 Both installation filters are intentional: root tooling/types plus the CLI agent dependency graph. Hosted upstream web applications are not this milestone. Their preview tarballs can be unavailable; filtered installation does not modify package versions or the lockfile. It is not a whole-monorepo build.
+
+## Low-prompt mode
+
+Skills discovered from other tools' folders are listed in every request's system prompt. With many of them the fixed prompt grows large, and a model that is partly offloaded to CPU spends most of a cold turn just reading it. Start the launcher with `--low` as its **first** argument to leave those skills out:
+
+```powershell
+node D:\githubs\opencode-local\scripts\opencode-local.mjs --low
+node D:\githubs\opencode-local\scripts\opencode-local.mjs --low run --model ollama/YOUR_MODEL "your prompt"
+```
+
+`OPENCODE_LOCAL_LOW=1` does the same without the argument. The switch is consumed by the launcher; `--low` anywhere else is passed to the agent unchanged. It sets `OPENCODE_DISABLE_EXTERNAL_SKILLS`, so skills under `~/.claude/skills` and `~/.agents/skills` are not loaded, and neither are a project's own `.claude/skills` and `.agents/skills` (from the working directory up to the workspace root). Skills in OpenCode's own locations still load, among them `~/.config/opencode/skills`, a project's `.opencode/skills`, and `skills.paths` in configuration: keep a short curated set there. Slash commands that come from the dropped skills are not available either, and their folders are no longer pre-approved for reading. Tools, agents and instructions such as `CLAUDE.md` are unchanged.
+
+Measured on the reference machine (RTX 5070 12 GB, Ollama 0.32.14, an owner profile with 55 external skills, 32K context, one run each, not a benchmark):
+
+| | Normal | `--low` |
+| --- | --- | --- |
+| Agent request size | about 17,950 tokens | about 7,360 tokens |
+| `qwen3.8:27b` (17.5 GiB loaded, 43% on GPU): cold prompt processing | 132 s | 21 s |
+| Same model: time to first token of the agent turn, cold | 148 s | 38 s |
+| Same model: time to first token, new session right after | 59 s | 2.6 s |
+
+Generation speed is not changed by the switch (about 5-7 tokens per second for that model in both modes), and a profile with few external skills gains little.
 
 ## Context policy
 
